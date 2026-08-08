@@ -1,0 +1,639 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+    <title>ChronosMatch - Trades</title>
+
+    <link rel="stylesheet" href="css/common.css">
+    <link rel="stylesheet" href="css/trades.css">
+
+    <link
+        href="https://fonts.googleapis.com/css2?family=Poppins:wght@300;400;500;600;700&display=swap"
+        rel="stylesheet">
+
+</head>
+
+<body>
+
+    <!-- ========================= -->
+    <!-- Main Wrapper -->
+    <!-- ========================= -->
+
+    <div class="wrapper">
+
+
+        <!-- ========================= -->
+        <!-- Sidebar -->
+        <!-- ========================= -->
+
+        <div class="sidebar">
+
+            <h2>ChronosMatch</h2>
+
+            <ul>
+
+                <li>
+                    <a href="dashboard.html">
+                        🏠 Dashboard
+                    </a>
+                </li>
+
+                <li>
+                    <a href="orderbook.html">
+                        📖 Order Book
+                    </a>
+                </li>
+
+                <li>
+                    <a href="trades.html" class="active">
+                        💹 Trades
+                    </a>
+                </li>
+
+                <li>
+                    <a href="analytics.html">
+                        📊 Analytics
+                    </a>
+                </li>
+
+                <li>
+                    <a href="logs.html">
+                        📜 Logs
+                    </a>
+                </li>
+
+                <li>
+                    <a href="settings.html">
+                        ⚙ Settings
+                    </a>
+                </li>
+
+            </ul>
+
+        </div>
+
+
+        <!-- ========================= -->
+        <!-- Main Content -->
+        <!-- ========================= -->
+
+        <div class="main-content">
+
+
+            <!-- ========================= -->
+            <!-- Navbar -->
+            <!-- ========================= -->
+
+            <div class="navbar">
+
+
+                <!-- Control Buttons -->
+
+                <div class="controls">
+
+                    <button id="startBtn">
+                        ▶ Start
+                    </button>
+
+                    <button id="pauseBtn">
+                        ⏸ Pause
+                    </button>
+
+                    <button id="resumeBtn">
+                        ⏯ Resume
+                    </button>
+
+                    <button id="stopBtn">
+                        ⏹ Stop
+                    </button>
+
+                </div>
+
+
+                <!-- Page Title -->
+
+                <h2>
+                    💹 Live Trades
+                </h2>
+
+
+                <!-- Right Section -->
+
+                <div class="right-section">
+
+
+                    <!-- Theme -->
+
+                    <button id="themeToggle">
+                        🌙
+                    </button>
+
+
+                    <!-- Notification -->
+
+                    <div class="notification">
+
+                        <button id="notificationBtn">
+
+                            🔔
+
+                            <span class="badge">
+                                5
+                            </span>
+
+                        </button>
+
+
+                        <div
+                            class="notification-panel"
+                            id="notificationPanel">
+
+                            <h3>
+                                Notifications
+                            </h3>
+
+                            <ul>
+
+                                <li>
+                                    ✅ Trade Executed
+                                </li>
+
+                                <li>
+                                    📈 Market Price Updated
+                                </li>
+
+                                <li>
+                                    ⚠ High Market Volatility
+                                </li>
+
+                                <li>
+                                    💰 New Trade Matched
+                                </li>
+
+                                <li>
+                                    🔔 New Order Received
+                                </li>
+
+                            </ul>
+
+                        </div>
+
+                    </div>
+
+
+                    <!-- Search -->
+
+                    <input
+                        type="text"
+                        id="searchBox"
+                        placeholder="Search...">
+
+
+                    <!-- Clock -->
+
+                    <div id="clock">
+                        Loading...
+                    </div>
+
+
+                    <!-- Admin -->
+
+                    <div class="admin-dropdown">
+
+                        <button id="adminBtn">
+                            👤 Admin ▼
+                        </button>
+
+
+                        <div
+                            class="dropdown-content"
+                            id="dropdownMenu">
+
+                            <a href="#">
+                                👤 My Profile
+                            </a>
+
+                            <a href="settings.html">
+                                ⚙ Settings
+                            </a>
+
+                            <a href="#">
+                                🌙 Dark Mode
+                            </a>
+
+                            <a href="#">
+                                🚪 Logout
+                            </a>
+
+                        </div>
+
+                    </div>
+
+                </div>
+
+            </div>
+
+
+            <!-- ========================= -->
+            <!-- Live Market Ticker -->
+            <!-- ========================= -->
+
+            <div class="ticker">
+
+                <marquee
+                    id="stockTicker"
+                    behavior="scroll"
+                    direction="left">
+
+                    📈 BTC : $65,200 ▲0.5%
+
+                    &nbsp;&nbsp;&nbsp;&nbsp;
+
+                    📉 ETH : $3,420 ▼0.3%
+
+                    &nbsp;&nbsp;&nbsp;&nbsp;
+
+                    📈 AAPL : $215 ▲1.2%
+
+                    &nbsp;&nbsp;&nbsp;&nbsp;
+
+                    📉 TSLA : $250 ▼0.8%
+
+                    &nbsp;&nbsp;&nbsp;&nbsp;
+
+                    📈 NVDA : $178 ▲2.1%
+
+                </marquee>
+
+            </div>
+
+
+            <!-- ========================= -->
+            <!-- Trade Summary Cards -->
+            <!-- ========================= -->
+
+            <div class="cards">
+
+                <div class="card">
+
+                    <h3>
+                        Total Trades
+                    </h3>
+
+                    <h1 id="totalTrades">
+                        443
+                    </h1>
+
+                </div>
+
+
+                <div class="card">
+
+                    <h3>
+                        Buy Trades
+                    </h3>
+
+                    <h1 id="buyTrades">
+                        245
+                    </h1>
+
+                </div>
+
+
+                <div class="card">
+
+                    <h3>
+                        Sell Trades
+                    </h3>
+
+                    <h1 id="sellTrades">
+                        198
+                    </h1>
+
+                </div>
+
+            </div>
+
+
+            <!-- ========================= -->
+            <!-- Live Trades -->
+            <!-- ========================= -->
+
+            <div class="trades-container">
+
+                <div class="trades-section">
+
+
+                    <div class="section-header">
+
+                        <h2>
+                            💹 Live Trade History
+                        </h2>
+
+                        <span class="live-indicator">
+                            ● LIVE
+                        </span>
+
+                    </div>
+
+
+                    <table id="tradesTable">
+
+                        <thead>
+
+                            <tr>
+
+                                <th>
+                                    Time
+                                </th>
+
+                                <th>
+                                    Symbol
+                                </th>
+
+                                <th>
+                                    Price
+                                </th>
+
+                                <th>
+                                    Quantity
+                                </th>
+
+                                <th>
+                                    Type
+                                </th>
+
+                                <th>
+                                    Status
+                                </th>
+
+                            </tr>
+
+                        </thead>
+
+
+                        <tbody>
+
+
+                            <tr>
+
+                                <td>
+                                    10:30:12
+                                </td>
+
+                                <td>
+                                    BTC
+                                </td>
+
+                                <td>
+                                    $65,200
+                                </td>
+
+                                <td>
+                                    5
+                                </td>
+
+                                <td>
+                                    <span class="buy">
+                                        BUY
+                                    </span>
+                                </td>
+
+                                <td>
+                                    <span class="completed">
+                                        Completed
+                                    </span>
+                                </td>
+
+                            </tr>
+
+
+                            <tr>
+
+                                <td>
+                                    10:30:08
+                                </td>
+
+                                <td>
+                                    ETH
+                                </td>
+
+                                <td>
+                                    $3,420
+                                </td>
+
+                                <td>
+                                    8
+                                </td>
+
+                                <td>
+                                    <span class="sell">
+                                        SELL
+                                    </span>
+                                </td>
+
+                                <td>
+                                    <span class="completed">
+                                        Completed
+                                    </span>
+                                </td>
+
+                            </tr>
+
+
+                            <tr>
+
+                                <td>
+                                    10:29:55
+                                </td>
+
+                                <td>
+                                    BTC
+                                </td>
+
+                                <td>
+                                    $65,180
+                                </td>
+
+                                <td>
+                                    3
+                                </td>
+
+                                <td>
+                                    <span class="buy">
+                                        BUY
+                                    </span>
+                                </td>
+
+                                <td>
+                                    <span class="pending">
+                                        Pending
+                                    </span>
+                                </td>
+
+                            </tr>
+
+
+                            <tr>
+
+                                <td>
+                                    10:29:41
+                                </td>
+
+                                <td>
+                                    AAPL
+                                </td>
+
+                                <td>
+                                    $215
+                                </td>
+
+                                <td>
+                                    12
+                                </td>
+
+                                <td>
+                                    <span class="sell">
+                                        SELL
+                                    </span>
+                                </td>
+
+                                <td>
+                                    <span class="completed">
+                                        Completed
+                                    </span>
+                                </td>
+
+                            </tr>
+
+
+                            <tr>
+
+                                <td>
+                                    10:29:26
+                                </td>
+
+                                <td>
+                                    NVDA
+                                </td>
+
+                                <td>
+                                    $178
+                                </td>
+
+                                <td>
+                                    7
+                                </td>
+
+                                <td>
+                                    <span class="buy">
+                                        BUY
+                                    </span>
+                                </td>
+
+                                <td>
+                                    <span class="completed">
+                                        Completed
+                                    </span>
+                                </td>
+
+                            </tr>
+
+
+                            <tr>
+
+                                <td>
+                                    10:29:10
+                                </td>
+
+                                <td>
+                                    TSLA
+                                </td>
+
+                                <td>
+                                    $250
+                                </td>
+
+                                <td>
+                                    4
+                                </td>
+
+                                <td>
+                                    <span class="sell">
+                                        SELL
+                                    </span>
+                                </td>
+
+                                <td>
+                                    <span class="pending">
+                                        Pending
+                                    </span>
+                                </td>
+
+                            </tr>
+
+
+                        </tbody>
+
+                    </table>
+
+                </div>
+
+            </div>
+
+
+            <!-- ========================= -->
+            <!-- Navigation Buttons -->
+            <!-- ========================= -->
+
+            <div class="actions">
+
+                <button
+                    onclick="window.location.href='dashboard.html'">
+
+                    🏠 Back to Dashboard
+
+                </button>
+
+
+                <button
+                    onclick="window.location.href='orderbook.html'">
+
+                    📖 Go to Order Book
+
+                </button>
+
+            </div>
+
+
+            <!-- ========================= -->
+            <!-- Footer -->
+            <!-- ========================= -->
+
+            <footer class="footer">
+
+                <p>
+                    © 2026 ChronosMatch | Trades Module
+                </p>
+
+            </footer>
+
+
+        </div>
+
+    </div>
+
+
+    <!-- ========================= -->
+    <!-- JavaScript -->
+    <!-- ========================= -->
+
+    <script src="js/trades.js"></script>
+
+</body>
+
+</html>

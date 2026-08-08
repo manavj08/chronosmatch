@@ -1,0 +1,623 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+
+    <meta charset="UTF-8">
+
+    <meta name="viewport"
+          content="width=device-width, initial-scale=1.0">
+
+    <title>ChronosMatch - Order Book</title>
+
+    <!-- Common Styles -->
+    <link rel="stylesheet" href="css/common.css">
+
+    <!-- Order Book Styles -->
+    <link rel="stylesheet" href="css/orderbook.css">
+
+    <!-- Google Font -->
+    <link
+        href="https://fonts.googleapis.com/css2?family=Poppins:wght@300;400;500;600;700&display=swap"
+        rel="stylesheet">
+
+</head>
+
+<body>
+
+    <!-- ========================= -->
+    <!-- Main Wrapper -->
+    <!-- ========================= -->
+
+    <div class="wrapper">
+
+
+        <!-- ========================= -->
+        <!-- Sidebar -->
+        <!-- ========================= -->
+
+        <div class="sidebar">
+
+            <h2>ChronosMatch</h2>
+
+            <ul>
+
+                <li>
+                    <a href="dashboard.html">
+                        🏠 Dashboard
+                    </a>
+                </li>
+
+                <li>
+                    <a href="orderbook.html" class="active">
+                        📖 Order Book
+                    </a>
+                </li>
+
+                <li>
+                    <a href="trades.html">
+                        💹 Trades
+                    </a>
+                </li>
+
+                <li>
+                    <a href="analytics.html">
+                        📊 Analytics
+                    </a>
+                </li>
+
+                <li>
+                    <a href="logs.html">
+                        📜 Logs
+                    </a>
+                </li>
+
+                <li>
+                    <a href="settings.html">
+                        ⚙ Settings
+                    </a>
+                </li>
+
+            </ul>
+
+        </div>
+
+
+        <!-- ========================= -->
+        <!-- Main Content -->
+        <!-- ========================= -->
+
+        <div class="main-content">
+
+
+            <!-- ========================= -->
+            <!-- Navbar -->
+            <!-- ========================= -->
+
+            <div class="navbar">
+
+
+                <!-- Control Buttons -->
+
+                <div class="controls">
+
+                    <button id="startBtn">
+                        ▶ Start
+                    </button>
+
+                    <button id="pauseBtn">
+                        ⏸ Pause
+                    </button>
+
+                    <button id="resumeBtn">
+                        ⏯ Resume
+                    </button>
+
+                    <button id="stopBtn">
+                        ⏹ Stop
+                    </button>
+
+                </div>
+
+
+                <!-- Page Title -->
+
+                <h2>
+                    📖 Live Order Book
+                </h2>
+
+
+                <!-- Right Section -->
+
+                <div class="right-section">
+
+
+                    <!-- Theme -->
+
+                    <button id="themeToggle">
+                        🌙
+                    </button>
+
+
+                    <!-- Notification -->
+
+                    <div class="notification">
+
+                        <button id="notificationBtn">
+
+                            🔔
+
+                            <span class="badge">
+                                5
+                            </span>
+
+                        </button>
+
+
+                        <div
+                            class="notification-panel"
+                            id="notificationPanel">
+
+                            <h3>
+                                Notifications
+                            </h3>
+
+                            <ul>
+
+                                <li>
+                                    ✅ BTC Order Completed
+                                </li>
+
+                                <li>
+                                    📈 ETH Price Increased
+                                </li>
+
+                                <li>
+                                    ⚠ High Market Volatility
+                                </li>
+
+                                <li>
+                                    💰 Portfolio Updated
+                                </li>
+
+                                <li>
+                                    🔔 New Trade Executed
+                                </li>
+
+                            </ul>
+
+                        </div>
+
+                    </div>
+
+
+                    <!-- Search -->
+
+                    <input
+                        type="text"
+                        id="searchBox"
+                        placeholder="Search...">
+
+
+                    <!-- Clock -->
+
+                    <div id="clock">
+                        Loading...
+                    </div>
+
+
+                    <!-- Admin -->
+
+                    <div class="admin-dropdown">
+
+                        <button id="adminBtn">
+                            👤 Admin ▼
+                        </button>
+
+
+                        <div
+                            class="dropdown-content"
+                            id="dropdownMenu">
+
+                            <a href="#">
+                                👤 My Profile
+                            </a>
+
+                            <a href="settings.html">
+                                ⚙ Settings
+                            </a>
+
+                            <a href="#">
+                                🌙 Dark Mode
+                            </a>
+
+                            <a href="#">
+                                🚪 Logout
+                            </a>
+
+                        </div>
+
+                    </div>
+
+                </div>
+
+            </div>
+
+
+            <!-- ========================= -->
+            <!-- Live Stock Ticker -->
+            <!-- ========================= -->
+
+            <div class="ticker">
+
+                <marquee
+                    id="stockTicker"
+                    behavior="scroll"
+                    direction="left">
+
+                    📈 BTC : $65,200 ▲0.5%
+
+                    &nbsp;&nbsp;&nbsp;&nbsp;
+
+                    📉 ETH : $3,420 ▼0.3%
+
+                    &nbsp;&nbsp;&nbsp;&nbsp;
+
+                    📈 AAPL : $215 ▲1.2%
+
+                    &nbsp;&nbsp;&nbsp;&nbsp;
+
+                    📉 TSLA : $250 ▼0.8%
+
+                    &nbsp;&nbsp;&nbsp;&nbsp;
+
+                    📈 NVDA : $178 ▲2.1%
+
+                </marquee>
+
+            </div>
+
+
+            <!-- ========================= -->
+            <!-- Order Book Summary Cards -->
+            <!-- ========================= -->
+
+            <div class="cards">
+
+                <div class="card">
+
+                    <h3>
+                        Total Buy Orders
+                    </h3>
+
+                    <h1 id="buyCount">
+                        245
+                    </h1>
+
+                </div>
+
+
+                <div class="card">
+
+                    <h3>
+                        Total Sell Orders
+                    </h3>
+
+                    <h1 id="sellCount">
+                        198
+                    </h1>
+
+                </div>
+
+
+                <div class="card">
+
+                    <h3>
+                        Orders Executed
+                    </h3>
+
+                    <h1 id="executedCount">
+                        443
+                    </h1>
+
+                </div>
+
+            </div>
+
+
+            <!-- ========================= -->
+            <!-- Live Order Book -->
+            <!-- ========================= -->
+
+            <div class="order-book-container">
+
+
+                <!-- ========================= -->
+                <!-- Buy Orders -->
+                <!-- ========================= -->
+
+                <div class="buy-section">
+
+                    <h2>
+                        🟢 Buy Orders
+                    </h2>
+
+
+                    <table id="buyTable">
+
+                        <thead>
+
+                            <tr>
+
+                                <th>
+                                    Price
+                                </th>
+
+                                <th>
+                                    Quantity
+                                </th>
+
+                                <th>
+                                    Status
+                                </th>
+
+                            </tr>
+
+                        </thead>
+
+
+                        <tbody>
+
+                            <tr>
+
+                                <td>
+                                    $65,200
+                                </td>
+
+                                <td>
+                                    5
+                                </td>
+
+                                <td>
+                                    <span class="completed">
+                                        Completed
+                                    </span>
+                                </td>
+
+                            </tr>
+
+
+                            <tr>
+
+                                <td>
+                                    $65,180
+                                </td>
+
+                                <td>
+                                    8
+                                </td>
+
+                                <td>
+                                    <span class="pending">
+                                        Pending
+                                    </span>
+                                </td>
+
+                            </tr>
+
+
+                            <tr>
+
+                                <td>
+                                    $65,150
+                                </td>
+
+                                <td>
+                                    12
+                                </td>
+
+                                <td>
+                                    <span class="completed">
+                                        Completed
+                                    </span>
+                                </td>
+
+                            </tr>
+
+
+                            <tr>
+
+                                <td>
+                                    $65,120
+                                </td>
+
+                                <td>
+                                    6
+                                </td>
+
+                                <td>
+                                    <span class="pending">
+                                        Pending
+                                    </span>
+                                </td>
+
+                            </tr>
+
+                        </tbody>
+
+                    </table>
+
+                </div>
+
+
+                <!-- ========================= -->
+                <!-- Sell Orders -->
+                <!-- ========================= -->
+
+                <div class="sell-section">
+
+                    <h2>
+                        🔴 Sell Orders
+                    </h2>
+
+
+                    <table id="sellTable">
+
+                        <thead>
+
+                            <tr>
+
+                                <th>
+                                    Price
+                                </th>
+
+                                <th>
+                                    Quantity
+                                </th>
+
+                                <th>
+                                    Status
+                                </th>
+
+                            </tr>
+
+                        </thead>
+
+
+                        <tbody>
+
+                            <tr>
+
+                                <td>
+                                    $65,250
+                                </td>
+
+                                <td>
+                                    3
+                                </td>
+
+                                <td>
+                                    <span class="pending">
+                                        Pending
+                                    </span>
+                                </td>
+
+                            </tr>
+
+
+                            <tr>
+
+                                <td>
+                                    $65,280
+                                </td>
+
+                                <td>
+                                    7
+                                </td>
+
+                                <td>
+                                    <span class="completed">
+                                        Completed
+                                    </span>
+                                </td>
+
+                            </tr>
+
+
+                            <tr>
+
+                                <td>
+                                    $65,300
+                                </td>
+
+                                <td>
+                                    9
+                                </td>
+
+                                <td>
+                                    <span class="pending">
+                                        Pending
+                                    </span>
+                                </td>
+
+                            </tr>
+
+
+                            <tr>
+
+                                <td>
+                                    $65,330
+                                </td>
+
+                                <td>
+                                    4
+                                </td>
+
+                                <td>
+                                    <span class="completed">
+                                        Completed
+                                    </span>
+                                </td>
+
+                            </tr>
+
+                        </tbody>
+
+                    </table>
+
+                </div>
+
+            </div>
+
+
+            <!-- ========================= -->
+            <!-- Navigation Buttons -->
+            <!-- ========================= -->
+
+            <div class="actions">
+
+                <button
+                    onclick="window.location.href='dashboard.html'">
+
+                    🏠 Back to Dashboard
+
+                </button>
+
+
+                <button
+                    onclick="window.location.href='trades.html'">
+
+                    💹 Go to Trades
+
+                </button>
+
+            </div>
+
+
+            <!-- ========================= -->
+            <!-- Footer -->
+            <!-- ========================= -->
+
+            <footer class="footer">
+
+                <p>
+                    © 2026 ChronosMatch | Order Book Module
+                </p>
+
+            </footer>
+
+
+        </div>
+
+    </div>
+
+
+    <!-- ========================= -->
+    <!-- Order Book JavaScript -->
+    <!-- ========================= -->
+
+    <script src="js/orderbook.js"></script>
+
+</body>
+
+</html>
