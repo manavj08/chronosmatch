@@ -1,4 +1,4 @@
-from shared.shared_interface import SharedRingMemory
+from shared.shared_memory import SharedRingMemory
 from shared.serializer import serialize, deserialize
 
 
