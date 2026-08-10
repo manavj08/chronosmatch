@@ -45,3 +45,33 @@
 
 ### Tests
 `pytest -v` → 9/9 passing (5 ring buffer, 4 engine).
+
+## Day 2 — Leader: sorted order insertion
+
+### Changed
+- `engine/order_book.py`: `insert_order()` now inserts each order into
+  its correct sorted position using `bisect.insort()`, instead of a
+  plain append.
+  - `buy_side` stays sorted descending by price (best/highest bid at
+    index 0)
+  - `sell_side` stays sorted ascending by price (best/lowest ask at
+    index 0)
+  - Equal-price orders keep arrival order (time priority) since
+    `insort` is stable relative to the sort key
+- `get_top_levels()` docstring updated — it was already just a slice,
+  but the slice is now genuinely sorted instead of insertion order
+
+### Added
+- `engine/tests/test_insert_order.py` — 5 new tests: descending buy
+  sort, ascending sell sort, best-bid/best-ask at index 0, time
+  priority at equal price, `depth` parameter behavior
+
+### Tests
+`pytest -v` → 14/14 passing (5 ring buffer, 4 engine wiring, 5 sorted
+insertion).
+
+### Notes for Day 3
+`match_order()` is still a placeholder — it calls `insert_order()`
+and nothing else. Day 3 adds real price-time priority matching on top
+of this sorted structure (best bid/ask are now always at index 0,
+which is what Day 3's crossing logic will check).

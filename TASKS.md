@@ -15,7 +15,7 @@ are frozen; only internals change without notice.
 | Module | Owner | Status |
 |---|---|---|
 | Ring buffer / IPC (`shared/`) | Member A | Done - real mmap, all tests pass |
-| Matching engine (`engine/`) | Leader | In progress - real wiring done Day 1, matching logic Day 2-4 |
+| Matching engine (`engine/`) | Leader | In progress - wiring (Day 1) + sorted insertion (Day 2) done, matching logic Day 3-4 |
 | Simulator + DB (`simulator/`, `database/`) | Member B | Not started |
 | FastAPI + WebSocket (`api/`) | Leader | Not started (Day 8+) |
 | Web dashboard (`frontend/`) | Member C | UI built, zero live data - `api.js`/`websocket.js` empty/fake |
@@ -27,7 +27,7 @@ are frozen; only internals change without notice.
 | Day | Work |
 |---|---|
 | 1 | DONE - Fix wiring bug: `engine/order_book.py` now uses real `shared.ring_buffer.RingBuffer`; resolved `shared_interface.py` name collision; project restructured into `engine/`, `api/`, `logging_service/` |
-| 2 | Sorted insertion (`insert_order`, best price first) |
+| 2 | DONE - Sorted insertion (`insert_order`, best price first, via `bisect.insort`) |
 | 3 | Price-time priority matching - full match |
 | 4 | Partial matching + remaining-quantity-stays-on-book |
 | 5 | Latency capture + matching unit tests |

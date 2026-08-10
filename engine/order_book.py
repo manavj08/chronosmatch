@@ -3,17 +3,23 @@ engine/order_book.py
 ---------------------
 LEADER'S MATCHING ENGINE.
 
-Day 1 change: this now reads from the REAL shared-memory ring buffer
+Day 1: now reads from the REAL shared-memory ring buffer
 (shared.ring_buffer.RingBuffer, built by Member A) instead of the old
 in-memory fake stub. Every other call site (Member C's dashboard, etc.)
 is unaffected, since get_top_levels() / get_last_trade() keep the same
 shape.
 
-insert_order() and match_order() are still placeholders --- real
-Price-Time Priority matching lands Day 2-4 (see TASKS.md).
+Day 2: insert_order() now does real sorted insertion by price
+(best price first on each side) instead of a plain append. This keeps
+get_top_levels() correct without needing to sort on every read, and
+sets up O(log n) best-price lookups for Day 3's matching logic.
+
+match_order() is still a placeholder --- real Price-Time Priority
+matching lands Day 3-4 (see TASKS.md).
 """
 
 import time
+from bisect import insort
 
 from shared.ring_buffer import RingBuffer
 
@@ -24,31 +30,43 @@ class OrderBook:
         # buffer backed by the real shared-memory region.
         self.ring_buffer = ring_buffer or RingBuffer(create=True)
 
-        # FAKE for now: plain lists. Day 2: keep sorted by price for
-        # O(log n) best-price lookups instead of O(n) scans.
+        # Day 2: both sides are kept sorted by price at all times.
+        # buy_side:  descending by price (best/highest bid at index 0)
+        # sell_side: ascending by price  (best/lowest ask at index 0)
+        # Ties broken by arrival order (time priority), since insort
+        # is stable relative to equal sort keys and orders are only
+        # ever appended, never reordered in place.
         self.buy_side: list[dict] = []   # each item: order dict
         self.sell_side: list[dict] = []
         self.trades: list[dict] = []
         self._trade_id_counter = 1
 
     # ------------------------------------------------------------------
-    # FAKE / PLACEHOLDER --- replace with real sorted insertion (Day 2)
+    # Day 2: real sorted insertion (was a plain append through Day 1).
     # ------------------------------------------------------------------
     def insert_order(self, order: dict) -> None:
-        """Add an order to the correct side. Currently just appends ---
-        no price sorting yet. Replace with sorted insertion."""
+        """Insert an order onto the correct side, keeping that side
+        sorted by price (best price first). Uses bisect.insort with a
+        sort key so this is O(log n) to find the slot, O(n) to shift ---
+        fine at this scale; a heap would be the next step if profiling
+        ever shows this as a bottleneck (see Day 20: performance pass).
+        """
         if order["side"] == "B":
-            self.buy_side.append(order)
+            # Best bid = highest price first -> sort key is negative price
+            insort(self.buy_side, order, key=lambda o: -o["price"])
         else:
-            self.sell_side.append(order)
+            # Best ask = lowest price first -> sort key is price as-is
+            insort(self.sell_side, order, key=lambda o: o["price"])
 
     # ------------------------------------------------------------------
     # FAKE / PLACEHOLDER --- replace with real matching (Day 3-4)
+    # Sorted insertion (Day 2) is done; this still just inserts, no
+    # crossing/matching happens yet.
     # ------------------------------------------------------------------
     def match_order(self, order: dict) -> None:
         """
-        Currently does nothing but insert the order --- no matching logic
-        yet. Replace with real Price-Time Priority matching:
+        Currently does nothing but insert the order (now sorted) --- no
+        matching logic yet. Replace with real Price-Time Priority matching:
 
         1. If order is a Buy: look at the best (lowest) Sell price.
            If Sell price <= Buy price -> trade.
@@ -78,8 +96,9 @@ class OrderBook:
     # even while the logic above is still fake.
     # ------------------------------------------------------------------
     def get_top_levels(self, depth: int = 5) -> dict:
-        """Return the top N price levels on each side.
-        FAKE for now: just returns whatever is in the lists, unsorted."""
+        """Return the top N price levels on each side. Both lists are
+        kept sorted by insert_order() (Day 2), so this is a plain slice
+        --- no sorting needed here."""
         return {
             "bids": self.buy_side[:depth],
             "asks": self.sell_side[:depth],
