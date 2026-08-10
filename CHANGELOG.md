@@ -46,9 +46,15 @@
 ### Tests
 `pytest -v` → 9/9 passing (5 ring buffer, 4 engine).
 
-## Day 2 — Leader: sorted order insertion
+## Day 2 — Leader + Member B + Member C (solo from here on)
 
-### Changed
+**Ownership change:** Members B and C are no longer contributing.
+All remaining work in the project — Leader's engine/API, Member B's
+simulator/database, Member C's frontend wiring — is being completed
+solo, one role's task per day going forward (see `TASKS.md` for the
+revised 25-day plan).
+
+### Leader — sorted order insertion
 - `engine/order_book.py`: `insert_order()` now inserts each order into
   its correct sorted position using `bisect.insort()`, instead of a
   plain append.
@@ -60,15 +66,37 @@
     `insort` is stable relative to the sort key
 - `get_top_levels()` docstring updated — it was already just a slice,
   but the slice is now genuinely sorted instead of insertion order
-
-### Added
-- `engine/tests/test_insert_order.py` — 5 new tests: descending buy
-  sort, ascending sell sort, best-bid/best-ask at index 0, time
+- Added `engine/tests/test_insert_order.py` — 5 new tests: descending
+  buy sort, ascending sell sort, best-bid/best-ask at index 0, time
   priority at equal price, `depth` parameter behavior
 
+### Member B — simulator config + order generation (new package)
+- `simulator/config.py`: `ORDERS_PER_SECOND`, `PRICE_MIN`/`PRICE_MAX`,
+  `MIN_QUANTITY`/`MAX_QUANTITY`, `BUY_PROBABILITY`, per spec
+- `simulator/order_generator.py`: `generate_order()` builds one random
+  order in the agreed shared format; `next_order_id()` gives
+  incrementing ids. **Not yet wired to the ring buffer** — that's
+  `market_simulator.py`'s `start_simulation()` etc., landing Day 4.
+- Added `simulator/tests/test_order_generator.py` — 5 tests: required
+  keys, valid side, price/quantity within configured range,
+  incrementing ids
+
+### Member C — frontend test scaffold
+- Added `frontend/tests/test_pages_exist.py` — structural tests since
+  there's no JS build tooling in this project (plain pytest against
+  the static HTML): all 7 pages exist, dashboard references its
+  chart/websocket/dashboard scripts, all pages have a responsive
+  viewport meta tag
+- **Real finding, not a test bug:** `dashboard.html` never includes a
+  `<script src="js/api.js">` tag at all, even though the file exists.
+  Documented as `test_api_js_not_yet_linked_in_dashboard` rather than
+  silently added, since `api.js` is still empty — linking an empty
+  script now would be premature. Real wiring + the `<script>` tag both
+  land together on Day 15.
+
 ### Tests
-`pytest -v` → 14/14 passing (5 ring buffer, 4 engine wiring, 5 sorted
-insertion).
+`pytest -v` → 23/23 passing (5 ring buffer, 4 engine wiring, 5 sorted
+insertion, 3 frontend structure, 5 order generation, 1 documented gap).
 
 ### Notes for Day 3
 `match_order()` is still a placeholder — it calls `insert_order()`

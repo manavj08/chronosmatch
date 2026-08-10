@@ -1,87 +1,85 @@
-# ChronosMatch — Team Tasks & Status
+# ChronosMatch — Day-Wise Work Log
 
-4-person team. Everyone codes against the real `shared/` package
-(built by Member A) from Day 1 onward. Its function names/signatures
-are frozen; only internals change without notice.
+**Update (Day 2):** Members B and C are no longer contributing. All
+remaining work (Leader + Member B's simulator/database + Member C's
+frontend wiring) is being done solo, one role's task interleaved per
+day across the remaining 23 days.
+
+Everyone's code still targets the real `shared/` package (built by
+Member A, already complete) — its function names/signatures are
+frozen.
 
 **Golden rule:** never rename or change the signature of
 `write_order()`, `read_order()`, `get_stats()`, `is_full()`,
-`is_empty()`, `size()` without telling the whole team.
+`is_empty()`, `size()` without checking every call site first.
 
 ---
 
-## Status summary (as of Day 1)
+## Status summary (as of Day 2)
 
-| Module | Owner | Status |
-|---|---|---|
-| Ring buffer / IPC (`shared/`) | Member A | Done - real mmap, all tests pass |
-| Matching engine (`engine/`) | Leader | In progress - wiring (Day 1) + sorted insertion (Day 2) done, matching logic Day 3-4 |
-| Simulator + DB (`simulator/`, `database/`) | Member B | Not started |
-| FastAPI + WebSocket (`api/`) | Leader | Not started (Day 8+) |
-| Web dashboard (`frontend/`) | Member C | UI built, zero live data - `api.js`/`websocket.js` empty/fake |
-
----
-
-## Leader — 25-day plan (`engine/`, `api/`, `logging_service/`)
-
-| Day | Work |
+| Module | Status |
 |---|---|
-| 1 | DONE - Fix wiring bug: `engine/order_book.py` now uses real `shared.ring_buffer.RingBuffer`; resolved `shared_interface.py` name collision; project restructured into `engine/`, `api/`, `logging_service/` |
-| 2 | DONE - Sorted insertion (`insert_order`, best price first, via `bisect.insort`) |
-| 3 | Price-time priority matching - full match |
-| 4 | Partial matching + remaining-quantity-stays-on-book |
-| 5 | Latency capture + matching unit tests |
-| 6 | Centralized logging service (`logging_service/`) |
-| 7 | Background engine runner thread (buffer -> book, continuous) |
-| 8 | FastAPI skeleton + `GET /api/orderbook` |
-| 9 | `GET /api/trades`, `GET /api/stats` |
-| 10 | `GET /api/logs`, `GET /api/buffer` |
-| 11 | `POST /api/start`, `/stop` |
-| 12 | `POST /api/pause`, `/resume` |
-| 13 | WebSocket server `ws://localhost:8000/ws` - broadcast loop |
-| 14 | WebSocket: order book + trade push |
-| 15 | WebSocket: stats + logs push |
-| 16 | Integration with Member B's simulator + DB |
-| 17 | Integration tests: engine + API |
-| 18 | Integration tests: WebSocket |
-| 19 | Error handling / edge cases |
-| 20 | Performance pass |
-| 21 | API documentation |
-| 22 | Manual test collection (Postman-style) |
-| 23 | Final integration with A/B/C |
-| 24 | Bug fixes from integration |
-| 25 | Final polish, deployment notes |
+| Ring buffer / IPC (`shared/`) | Done — real mmap, all tests pass (built pre-Day-1) |
+| Matching engine (`engine/`) | In progress — wiring (Day 1) + sorted insertion (Day 2) done, matching logic Day 3+ |
+| Simulator (`simulator/`) | In progress — config + order generation (Day 2) done, sim control + ring buffer wiring Day 4 |
+| Database (`database/`) | Not started (Day 6) |
+| FastAPI + WebSocket (`api/`) | Not started (Day 13+) |
+| Web dashboard (`frontend/`) | UI built, zero live data. Test scaffold added Day 2. `api.js`/`websocket.js` wiring pending. |
 
 ---
 
-## Member A — `shared/` — Complete
-- `serializer.py`, `ring_buffer.py`, `shared_memory.py` - real mmap,
+## 25-day plan (all roles, solo)
+
+| Day | Task |
+|---|---|
+| 1 | DONE - Leader: fix wiring bug, resolve naming collision, restructure into `engine/`, `api/`, `logging_service/` |
+| 2 | DONE - Leader: sorted insertion (`bisect.insort`). Member B: `simulator/config.py`, `simulator/order_generator.py` (pure order generation, not yet wired to ring buffer). Member C: `frontend/tests/` scaffold — structural page tests |
+| 3 | Leader: price-time priority matching — full match |
+| 4 | Member B: `simulator/market_simulator.py` — start/pause/resume/stop, calls `write_order()` |
+| 5 | Leader: partial matching + remaining-quantity-stays-on-book |
+| 6 | Member B: `database/models.py`, `database/sqlite_manager.py` — schema, `save_trade()` |
+| 7 | Member C: `api.js` skeleton — functions defined, not yet callable (no server exists yet) |
+| 8 | Leader: latency capture + matching unit tests |
+| 9 | Member B: `get_recent_trades()`, `get_trade_history()`, `get_statistics()`, `clear_database()` |
+| 10 | Leader: centralized logging service (`logging_service/`) |
+| 11 | Member B: simulator + database unit tests |
+| 12 | Leader: background engine runner thread (ring buffer -> order book, continuous) |
+| 13 | Leader: FastAPI skeleton + `GET /api/orderbook` |
+| 14 | Leader: `GET /api/trades`, `GET /api/stats` |
+| 15 | Member C: wire `api.js` for real against live endpoints |
+| 16 | Leader: `GET /api/logs`, `GET /api/buffer` |
+| 17 | Leader: `POST /api/start`, `/stop`, `/pause`, `/resume` |
+| 18 | Member C: wire Start/Pause/Resume/Stop buttons to real POST calls |
+| 19 | Leader: WebSocket server (`ws://localhost:8000/ws`) + broadcast loop |
+| 20 | Member C: wire `websocket.js` for real (replace `setInterval` fakes) |
+| 21 | Leader: integration — simulator -> ring buffer -> engine -> database -> API |
+| 22 | Integration tests: engine + API + WebSocket, end to end |
+| 23 | Member C: real `frontend/tests/` (API calls, WS reconnect, button behavior) |
+| 24 | Error handling, edge cases, bug fixes from integration |
+| 25 | Final polish, documentation, deployment notes |
+
+---
+
+## Reference: original assignment scope (now solo)
+
+### Member A — `shared/` — Complete (pre-existing)
+- `serializer.py`, `ring_buffer.py`, `shared_memory.py` — real mmap,
   zero-copy, circular queue, process-safe (`multiprocessing.Lock`)
-- `tests/test_ring_buffer.py` - 5/5 passing
-- Optional follow-up: a genuine two-process integration test (today's
-  tests all run in a single process)
+- `tests/test_ring_buffer.py` — 5/5 passing
 
-## Member B — `simulator/`, `database/` — Not started
-See `__ChronosMatch_Member_B.pdf` for full spec. Nothing exists yet.
-**Also needs to fix:** root `simulator_starter.py` currently imports
-`shared_interface`, which was deleted Day 1 (superseded by
-`shared/`). This file should be replaced entirely by the real
-`simulator/market_simulator.py` + `simulator/order_generator.py` per
-spec, not patched.
+### Member B scope — `simulator/`, `database/`
+Full spec: `__ChronosMatch_Member_B.pdf`. In progress per plan above.
+**Note:** root `simulator_starter.py` still imports the deleted
+`shared_interface` module (removed Day 1) — it will be fully replaced
+by `simulator/market_simulator.py` on Day 4, not patched.
 
-## Member C — `frontend/`, `backend/dashboard/` — UI only
-See `__ChronosMatch_Member_C.pdf` for full spec.
-- `frontend/js/api.js` is empty - needs real `fetch()` calls to the
-  Leader's REST endpoints (available from Day 8 onward)
-- `frontend/js/websocket.js` only fakes messages via `setInterval` -
-  needs a real `new WebSocket("ws://localhost:8000/ws")` connection
-  (available from Day 13 onward)
-- Control buttons (`Start`/`Pause`/`Resume`/`Stop`) currently just
-  `alert()` - need real `POST` calls
-- `frontend/tests/` doesn't exist yet
-- **Decision needed:** root `dashboard_starter.py` (curses terminal
-  UI) still imports the old `order_book` path. Since the web
-  dashboard supersedes it per your spec, recommend retiring this file
-  - confirm with Member C before deleting.
+### Member C scope — `frontend/`
+Full spec: `__ChronosMatch_Member_C.pdf`. UI already built; wiring
+in progress per plan above.
+**Note:** root `dashboard_starter.py` (old curses terminal UI) still
+imports the pre-restructure `order_book` path. Superseded by the web
+dashboard — will be retired rather than fixed, during Day 21
+integration.
 
 See `HOW_TO_RUN.md` for environment setup and how to run each piece.
+See `CHANGELOG.md` for what actually shipped each day.

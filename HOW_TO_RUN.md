@@ -25,8 +25,9 @@ before building on top of it.
 ```
 python -m engine.order_book    # matching engine smoke test, real ring buffer
 python -m shared.ring_buffer   # (importable only, no __main__ demo yet)
-python simulator_starter.py    # BROKEN as of Day 1 - see TASKS.md, Member B
-python dashboard_starter.py    # BROKEN as of Day 1 - see TASKS.md, Member C
+python -m simulator.order_generator   # order generation smoke test (Day 2)
+python simulator_starter.py    # BROKEN as of Day 1 - superseded by simulator/ (Day 4)
+python dashboard_starter.py    # BROKEN as of Day 1 - superseded by web dashboard
 ```
 
 `dashboard_starter.py` and `simulator_starter.py` still reference the
