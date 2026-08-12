@@ -103,3 +103,120 @@ insertion, 3 frontend structure, 5 order generation, 1 documented gap).
 and nothing else. Day 3 adds real price-time priority matching on top
 of this sorted structure (best bid/ask are now always at index 0,
 which is what Day 3's crossing logic will check).
+
+## Day 2 (revised) — Major pivot: company spec received
+
+**The company issued the official project spec** ("ChronosMatch —
+Zero-Copy High-Frequency Trading Engine"). This replaces the earlier
+self-directed FastAPI + web-dashboard plan. See `TASKS.md` for the
+full rationale and the revised 25-day plan mapped to the spec's
+4-week structure.
+
+### Archived (not deleted)
+- `api/`, `frontend/`, `logging_service/` moved to
+  `archive_web_dashboard/`. This work is preserved for reference but
+  is no longer the active deliverable — the spec requires a curses
+  terminal dashboard, not a web dashboard.
+
+### Confirmed spec-compliant, no changes needed
+- `shared/` (Member A's ring buffer): already uses raw `struct.pack`
+  binary serialization over `mmap`, not JSON/Pickle. This satisfies
+  the spec's Week 1 "Zero-Copy IPC Bus" requirement as originally
+  built.
+
+### Added — Cython matching engine (new `matching_engine/` package)
+- `order_book.pyx`: `OrderBookCython` — Limit Order Book with sorted
+  insertion. Order fields typed with C types (`int64_t`, `double`,
+  `char`) internally; comparisons during insertion happen at the C
+  level via a manually written binary search (not Python's `bisect`,
+  which isn't usable the same way against C-typed comparisons).
+- `setup.py`: build script using `Cython.Build.cythonize`. Compiles
+  to a real platform-specific `.so` — verified working:
+  ```
+  cd matching_engine && python setup.py build_ext --inplace
+  ```
+- `matching_engine/tests/test_order_book_cython.py` — 5 tests,
+  including a direct cross-check that the compiled Cython version and
+  the pure-Python reference (`engine/order_book.py`) produce identical
+  sort ordering for the same input.
+- `.gitignore` updated to exclude compiled artifacts (`.so`, `.pyd`,
+  generated `.c`, `build/`) — these are platform-specific build
+  outputs, not source.
+
+### Notes
+- `engine/order_book.py` (pure Python) is being kept, not deleted —
+  it now serves as the correctness reference the Cython version is
+  checked against, per `test_matches_pure_python_reference_ordering`.
+- Matching (crossing) logic itself is still a placeholder in the
+  Cython version too — Day 5 per the revised plan.
+- The asyncio market firehose (Week 1, second track) and curses
+  dashboard (Week 2) have not started yet — see `TASKS.md`.
+
+### Tests
+`pytest -v` → 28/28 passing (23 previous + 5 new Cython engine tests).
+
+## Demo tooling (supports Day 2 deliverables)
+
+### Added
+- `setup_demo.py` — one-command wrapper to build the Cython extension
+  from the project root
+- `run_demo.py` — live two-process demo: a real generator process
+  writes orders into the shared-memory ring buffer, a real matcher
+  process (separate PID) reads from the same memory region and feeds
+  the compiled Cython order book. Prints best bid/ask live as orders
+  arrive.
+- Verified: ran end to end, both processes exit cleanly, correct order
+  count for the configured duration/rate.
+
+Honestly scoped in the script's own docstring: this demonstrates
+zero-copy IPC + the compiled Cython engine running, not yet real
+trade matching, the curses dashboard, or latency numbers — those land
+on their scheduled days per `TASKS.md`.
+
+## Day 3 — Member B: asyncio market firehose
+
+### Added
+- `simulator/market_firehose.py`: `MarketFirehose` class — async
+  order generation and ring-buffer writing, per spec ("asyncio
+  script that blasts mock trade orders into the IPC bus").
+  - `start()` / `stop()` / `pause()` / `resume()` matching the shape
+    the spec calls for (`start_simulation()` etc.)
+  - Bounded retry-with-backoff when the ring buffer is full, instead
+    of blocking forever or busy-looping
+  - `get_stats()`: orders written/dropped, elapsed time, target vs.
+    actual achieved rate — needed for Day 4's throughput push
+- `pytest.ini`: `asyncio_mode = auto`, so `@pytest.mark.asyncio` tests
+  work without per-test boilerplate
+- `simulator/tests/test_market_firehose.py` — 6 tests: start/stop
+  writes orders, pause halts generation, resume continues it, stats
+  shape and rate sanity, double-start is a no-op, backoff behavior
+  under a full buffer
+
+### Notes — honesty about scope
+The spec's phrase "simulating a firehose of Nasdaq/NYSE financial
+tick data" via a websocket client does NOT mean this connects to a
+real market data feed — there isn't one in scope for this project.
+What's actually built is the asyncio *architecture* a websocket
+client would use (single event loop, non-blocking, many "ticks" in
+flight) driving the same local random order generator from Day 2
+(`order_generator.py`, unchanged). Documented directly in
+`market_firehose.py`'s module docstring so this isn't misrepresented
+later.
+
+`order_generator.py` itself was not modified — `generate_order()` is
+still the function that builds one random order. `market_firehose.py`
+is what drives it asynchronously at scale and writes results into the
+ring buffer; that wiring didn't exist before today.
+
+### Tests
+`pytest -v` → 34/34 passing (28 from Day 1-2 + 6 new asyncio firehose
+tests). Requires the Cython extension to be built first (`python
+setup_demo.py`) — without it, `matching_engine/tests/` skips cleanly
+and the count is 29/29 + 1 skipped instead.
+
+### Notes for Day 4
+Today's smoke test (`python -m simulator.market_firehose`) ran 50
+orders/sec deliberately, for easy verification. Day 4 pushes toward
+the spec's 100,000 orders/sec target and measures what's actually
+achievable — the retry/backoff design here is what will be stress
+tested.
