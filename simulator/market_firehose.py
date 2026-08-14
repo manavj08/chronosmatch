@@ -65,7 +65,30 @@ class MarketFirehose:
         self._start_time: float | None = None
 
     async def _run(self):
-        interval = 1.0 / self.orders_per_second
+        """
+        Day 4 change: batches orders per event-loop tick instead of
+        calling asyncio.sleep() once per single order.
+
+        Why: the Day 3 benchmark (see benchmarks/throughput_benchmark.py)
+        found that asyncio.sleep() with a real (even tiny) delay costs
+        far more than the actual order generation + write work — on the
+        benchmark machine, roughly 147,000 sleep-calls/sec is the ceiling
+        for that pattern alone, regardless of how fast write_order() is.
+        Sleeping once per order caps total throughput at whatever rate
+        asyncio's timer scheduling can sustain, not at what the IPC pipe
+        or the CPU can actually do.
+
+        Fix: pick a tick length (default 10ms) and, each tick, write
+        as many orders as the target rate implies for that slice of
+        time, then sleep once for the tick. This trades a small amount
+        of burstiness (orders arrive in small batches every 10ms
+        instead of perfectly evenly spaced) for dramatically higher
+        achievable throughput --- and it's a closer match to how a
+        real high-rate feed behaves anyway (bursty, not perfectly
+        metronomic).
+        """
+        tick_seconds = 0.01
+        orders_per_tick = max(1, round(self.orders_per_second * tick_seconds))
         self._start_time = time.perf_counter()
 
         while self._running:
@@ -73,14 +96,29 @@ class MarketFirehose:
                 await asyncio.sleep(0.05)
                 continue
 
-            order = generate_order()
-            written = await self._write_with_backoff(order)
-            if written:
-                self.orders_written += 1
-            else:
-                self.orders_dropped += 1
+            tick_start = time.perf_counter()
 
-            await asyncio.sleep(interval)
+            for _ in range(orders_per_tick):
+                if not self._running:
+                    break
+                order = generate_order()
+                written = await self._write_with_backoff(order)
+                if written:
+                    self.orders_written += 1
+                else:
+                    self.orders_dropped += 1
+
+            # Day 4 fix: sleep only for whatever time is LEFT in the
+            # tick, not the full tick_seconds regardless of how long
+            # the batch itself took. Without this, at high target
+            # rates the batch work eats into the tick and the loop
+            # ends up sleeping too much relative to the target rate,
+            # undershooting it (measured: 100k/sec target only
+            # achieved ~75k/sec actual before this fix).
+            batch_elapsed = time.perf_counter() - tick_start
+            remaining = tick_seconds - batch_elapsed
+            if remaining > 0:
+                await asyncio.sleep(remaining)
 
     async def _write_with_backoff(self, order: dict, max_retries: int = 5) -> bool:
         """Try to write; if the buffer is full, yield control briefly

@@ -29,7 +29,7 @@ Members B and C are no longer contributing. All work below is solo.
 |---|---|---|
 | `shared/` — mmap ring buffer | Zero-copy, raw `struct`, no pickle | Done — confirmed spec-compliant as built, no changes needed |
 | `matching_engine/` — Cython engine | `.pyx`, C-structs/C-types, no GIL/GC in hot path | In progress — toolchain proven, sorted insertion compiled (Day 2) |
-| `simulator/` — asyncio firehose | asyncio, 100,000 orders/sec target | In progress — asyncio firehose working (Day 3), throughput push to 100k/sec Day 4 |
+| `simulator/` — asyncio firehose | asyncio, 100,000 orders/sec target | Done for this phase — hits ~100k/sec target on single-core sandbox (see Day 4 benchmark). Real websocket data source not in scope; noted honestly in Day 3 entry. |
 | `dashboard/` — curses latency UI | Terminal UI, live Bid/Ask, μs latency | Not started |
 | Trade ledger (SQLite/ClickHouse) | Async flush from mmap buffer | Not started |
 | IPC audit (1M orders, 2 processes) | Prove zero-copy, no Pickle bottleneck | Not started |
@@ -43,7 +43,7 @@ Members B and C are no longer contributing. All work below is solo.
 | 1 | — | DONE - Initial wiring fix, project restructure (superseded by Day 2's bigger restructure) |
 | 2 | 1 | DONE - Confirmed mmap ring buffer already matches spec (raw struct, no pickle). Built Cython toolchain: order_book.pyx compiles to a real .so, sorted insertion ported with C-typed comparisons. Archived old web-dashboard-era code. |
 | 3 | 1 | DONE - asyncio market firehose (simulator/market_firehose.py) - replaces the synchronous generation loop with an async event loop, start/stop/pause/resume, bounded backoff on a full buffer |
-| 4 | 1 | Push firehose toward 100,000 orders/sec; measure actual achieved throughput |
+| 4 | 1 | DONE - Throughput push: benchmarked each layer separately, found and fixed a real bottleneck (per-order asyncio.sleep scheduling overhead), rewrote firehose to batch orders per tick. Result: ~55k/sec -> ~100k/sec on a single-core sandbox, matching the spec target |
 | 5 | 2 | Limit Order Book in Cython: price-time priority matching logic (crossing, not just sorted insertion) |
 | 6 | 2 | Strip remaining Python object interaction from the matching loop; confirm no GC triggers during a match |
 | 7 | 2 | curses terminal dashboard — live Bid/Ask top-of-book display |

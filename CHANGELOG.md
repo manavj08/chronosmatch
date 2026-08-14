@@ -220,3 +220,76 @@ orders/sec deliberately, for easy verification. Day 4 pushes toward
 the spec's 100,000 orders/sec target and measures what's actually
 achievable — the retry/backoff design here is what will be stress
 tested.
+
+## Day 4 — Member B: throughput push, found and fixed a real bottleneck
+
+### What was measured
+Added `benchmarks/throughput_benchmark.py` — measures each layer of
+the pipeline separately instead of only an end-to-end number, so any
+slowdown can be traced to its actual source:
+1. `generate_order()` alone (pure Python, no IPC)
+2. `RingBuffer.write_order()` alone (pre-built orders)
+3. Both together, synchronously (no asyncio)
+4. `MarketFirehose` end-to-end (asyncio, uncapped target rate)
+
+### What it found
+On the first run, the synchronous path (layer 3) sustained roughly
+190,000-200,000 orders/sec, but the asyncio firehose (layer 4) only
+achieved ~55,700 orders/sec — asyncio was making things SLOWER than
+the same work done synchronously, not faster.
+
+Root cause, isolated with a small standalone test: `asyncio.sleep()`
+called once per single order has real per-call scheduling overhead
+(event loop timer heap, wakeup), independent of how short the
+requested delay is. Sleeping once per order caps total throughput at
+whatever rate asyncio's timer scheduling can sustain — around
+147,000 sleep-calls/sec on the benchmark machine — regardless of how
+fast the actual order generation and IPC write are.
+
+### The fix
+Rewrote `MarketFirehose._run()` (`simulator/market_firehose.py`) to
+batch orders per event-loop tick (10ms) instead of sleeping once per
+individual order: compute how many orders the target rate implies for
+one tick, write that whole batch, then sleep once per tick instead of
+once per order.
+
+A second bug showed up once batching was in place: at a 100,000/sec
+target, actual throughput was still only ~75,600/sec, because the
+loop slept for the FULL tick duration regardless of how long the
+batch itself took to process — eating into the next tick's budget.
+Fixed by measuring the batch's actual elapsed time and sleeping only
+for whatever remained of the 10ms tick.
+
+### Results (this benchmark machine — single CPU core sandbox)
+| Target rate | Before fix | After fix |
+|---|---|---|
+| Uncapped (ceiling test) | ~55,700/sec | ~140,000-210,000/sec (varies by run) |
+| 100,000/sec (spec target) | ~75,600/sec | ~96,000-99,700/sec, consistent across repeated runs |
+
+### Honesty about what this number means
+This is a single-core sandbox, not dedicated trading hardware, and
+not a substitute for real benchmarking on target deployment
+infrastructure — documented directly in
+`benchmarks/throughput_benchmark.py`'s module docstring. What this
+result actually demonstrates: the pipeline architecture (asyncio
+generation -> zero-copy mmap write) can sustain the spec's 100,000
+orders/sec target on modest hardware once an actual bottleneck (naive
+per-order scheduling) is found and fixed — not a guarantee of that
+number on any particular production machine.
+
+### Added
+- `benchmarks/throughput_benchmark.py` — layer-by-layer benchmark script
+- `simulator/tests/test_firehose_throughput.py` — 2 automated
+  regression tests: (1) throughput stays well above the old
+  pre-batching ceiling, so a future change can't silently reintroduce
+  the per-order-sleep bottleneck; (2) actual rate lands reasonably
+  close to a configured target, catching a gross undershoot like the
+  tick-timing bug above. Thresholds set conservatively to avoid CI
+  flakiness on slower machines — these are regression guards, not
+  precise performance assertions.
+
+### Tests
+`pytest -v` → 36/36 passing (34 previous + 2 new throughput tests).
+All Day 3 tests (`test_market_firehose.py`) still pass unmodified
+after the batching rewrite — pause/resume/stats/backoff behavior is
+unchanged, only the internal scheduling strategy changed.

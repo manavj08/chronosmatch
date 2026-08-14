@@ -75,6 +75,7 @@ python -m engine.order_book               # pure-Python reference engine, real r
 python -m shared.ring_buffer               # (importable only, no __main__ demo yet)
 python -m simulator.order_generator        # order generation smoke test (still used internally by market_firehose.py)
 python -m simulator.market_firehose        # asyncio firehose smoke test (Day 3), ~3s at 50 orders/sec
+python benchmarks/throughput_benchmark.py  # Day 4: layer-by-layer throughput measurement, ~10s
 ```
 
 `simulator_starter.py` and `dashboard_starter.py` (repo root) are
