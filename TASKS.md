@@ -28,7 +28,7 @@ Members B and C are no longer contributing. All work below is solo.
 | Module | Spec requirement | Status |
 |---|---|---|
 | `shared/` — mmap ring buffer | Zero-copy, raw `struct`, no pickle | Done — confirmed spec-compliant as built, no changes needed |
-| `matching_engine/` — Cython engine | `.pyx`, C-structs/C-types, no GIL/GC in hot path | In progress — toolchain proven, sorted insertion compiled (Day 2) |
+| `matching_engine/` — Cython engine | `.pyx`, C-structs/C-types, no GIL/GC in hot path | In progress — real matching logic done (Day 5), GC/object-stripping optimization pass Day 6 |
 | `simulator/` — asyncio firehose | asyncio, 100,000 orders/sec target | Done for this phase — hits ~100k/sec target on single-core sandbox (see Day 4 benchmark). Real websocket data source not in scope; noted honestly in Day 3 entry. |
 | `dashboard/` — curses latency UI | Terminal UI, live Bid/Ask, μs latency | Not started |
 | Trade ledger (SQLite/ClickHouse) | Async flush from mmap buffer | Not started |
@@ -44,7 +44,7 @@ Members B and C are no longer contributing. All work below is solo.
 | 2 | 1 | DONE - Confirmed mmap ring buffer already matches spec (raw struct, no pickle). Built Cython toolchain: order_book.pyx compiles to a real .so, sorted insertion ported with C-typed comparisons. Archived old web-dashboard-era code. |
 | 3 | 1 | DONE - asyncio market firehose (simulator/market_firehose.py) - replaces the synchronous generation loop with an async event loop, start/stop/pause/resume, bounded backoff on a full buffer |
 | 4 | 1 | DONE - Throughput push: benchmarked each layer separately, found and fixed a real bottleneck (per-order asyncio.sleep scheduling overhead), rewrote firehose to batch orders per tick. Result: ~55k/sec -> ~100k/sec on a single-core sandbox, matching the spec target |
-| 5 | 2 | Limit Order Book in Cython: price-time priority matching logic (crossing, not just sorted insertion) |
+| 5 | 2 | DONE - Real price-time priority matching in the Cython engine: full match, partial match, multi-level book walking, time priority at equal price. Demo updated to show live trade execution. |
 | 6 | 2 | Strip remaining Python object interaction from the matching loop; confirm no GC triggers during a match |
 | 7 | 2 | curses terminal dashboard — live Bid/Ask top-of-book display |
 | 8 | 2 | Mid-Project Review: IPC audit — 1M orders between two real OS processes, no Pickle, prove zero-copy holds under load |

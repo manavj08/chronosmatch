@@ -293,3 +293,60 @@ number on any particular production machine.
 All Day 3 tests (`test_market_firehose.py`) still pass unmodified
 after the batching rewrite — pause/resume/stats/backoff behavior is
 unchanged, only the internal scheduling strategy changed.
+
+## Day 5 — Leader: real price-time priority matching in the Cython engine
+
+### Added
+- `matching_engine/order_book.pyx`: `match_order()` — real crossing
+  logic, replacing the Day 2-4 placeholder that only called
+  `insert_order()`. Algorithm:
+  1. Incoming Buy checks the best (lowest) resting Sell price;
+     crosses while ask <= buy price.
+  2. Incoming Sell checks the best (highest) resting Buy price;
+     crosses while bid >= sell price.
+  3. Fill quantity = min(incoming remaining, resting order quantity).
+  4. Fully consumed resting orders are removed from the book;
+     partially filled resting orders are reduced in place and keep
+     their price-time priority position.
+  5. Any leftover incoming quantity is inserted onto the book via the
+     existing sorted `insert_order()`.
+  - Trade price always executes at the RESTING order's price (the
+    better price), not the incoming order's price — verified by
+    `test_buy_matches_at_better_price_than_offered`.
+  - `_record_trade()` and `get_last_trade()` ported from the
+    pure-Python reference's shape, so trade dicts match across both
+    engines.
+- `matching_engine/tests/test_matching.py` — 12 tests: full match
+  (both directions), partial match (both directions), multi-level
+  book walking (large order consumes several price levels), price
+  limit enforcement (order stops matching once price no longer
+  crosses, even with cheaper/dearer orders still on the book beyond
+  that), no-cross resting, matching against an empty book, time
+  priority at equal price, trade id sequencing, `get_last_trade()`
+  correctness.
+- `run_demo.py` updated: the matcher process now calls
+  `match_order()` instead of `insert_order()`, and prints each trade
+  as it executes. Manually verified — a real run produced 30 trades
+  from 50 generated orders across two real OS processes, including
+  visible multi-fill matches where one incoming order consumed
+  several resting orders in sequence.
+
+### Notes
+The pure-Python reference (`engine/order_book.py`) was NOT given
+matching logic today — its own docstring scopes it as the Day 2
+correctness baseline for sorted *insertion* specifically, and the
+revised 25-day plan (Day 2 pivot) scopes real matching to the Cython
+engine, which is the actual spec deliverable. Extending the Python
+reference with matching too was considered but deferred as
+out-of-scope for today rather than done silently.
+
+Cython matching still allocates trade dicts as Python objects — this
+is fine for correctness (today's goal) but not yet GC-safe under the
+spec's "zero pauses during a trade" requirement. That's explicitly
+Day 6's job ("Strip remaining Python object interaction from the
+matching loop; confirm no GC triggers during a match").
+
+### Tests
+`pytest -v` → 48/48 passing (36 previous + 12 new matching tests).
+All Day 2 Cython tests (`test_order_book_cython.py`) still pass
+unmodified.

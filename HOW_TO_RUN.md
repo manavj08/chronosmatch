@@ -45,14 +45,20 @@ This starts two REAL, separate operating system processes:
 Runs for 10 seconds by default (5 orders/sec, deliberately slow so
 it's easy to watch and narrate). You'll see both processes' PIDs in
 the output — proof they're genuinely separate processes, not two
-threads — and the best bid/ask updating live as orders land.
+threads — the best bid/ask updating live as orders land, and TRADE
+lines whenever an incoming order actually crosses and matches against
+the book (Day 5).
 
 **What this demo proves:** zero-copy IPC between two real processes,
-and the compiled Cython engine actually running.
+the compiled Cython engine actually running, and real price-time
+priority matching — trades executing live, including partial fills
+across multiple resting orders.
 **What it doesn't show yet** (honestly, not built yet — see
-`TASKS.md`): real trade matching/crossing, the curses dashboard,
-microsecond latency numbers, and the full 100k-orders/sec asyncio
-firehose. The demo uses a small, readable rate on purpose.
+`TASKS.md`): the curses dashboard, microsecond latency numbers, and
+GC-pause verification during matching. The demo also uses a small,
+readable order rate on purpose — Day 4's asyncio firehose can sustain
+~100k/sec (see `benchmarks/`), but that would scroll by too fast to
+narrate live.
 
 Adjust `DEMO_DURATION_SECONDS` / `ORDERS_PER_SECOND` at the top of
 `run_demo.py` if you want it faster, slower, or longer for a

@@ -15,20 +15,22 @@ What this actually demonstrates (nothing here is faked or simulated):
    raw bytes at the same memory address.
 3. THE COMPILED CYTHON ENGINE: matching_engine/order_book.pyx, built
    to a real .so and imported like any other Python module.
-4. Live, human-readable output showing orders flowing through the
-   system and the order book staying correctly sorted by price.
+4. REAL PRICE-TIME PRIORITY MATCHING (Day 5): incoming orders that
+   cross the best opposite price actually execute as trades, with
+   partial fills handled correctly --- not just sorted insertion.
+5. Live, human-readable output showing orders flowing through the
+   system, trades executing when prices cross, and the book staying
+   correctly sorted by price.
 
 What this demo does NOT yet show (honestly, not built yet --- see
 TASKS.md for the day it's scheduled):
-   - actual trade matching / crossing (Day 5) --- today the engine only
-     performs sorted insertion, so you'll see orders land on the book,
-     not trades execute
    - the curses live dashboard (Day 7) --- this script prints to plain
      stdout instead
    - nanosecond latency measurement (Day 12-13)
-   - the asyncio 100k-orders/sec firehose (Day 3-4) --- this demo uses
-     a small, readable order rate instead, on purpose, so the output
-     is watchable
+   - GC-pause verification during matching (Day 6)
+   - the demo uses a small, readable order rate on purpose (Day 4's
+     asyncio firehose can sustain ~100k/sec, see benchmarks/), so the
+     output here stays watchable rather than scrolling by instantly
 
 Run:
     python setup_demo.py     (one-time, builds the Cython extension)
@@ -69,7 +71,9 @@ def generator_process():
 
 def matcher_process():
     """Real, separate OS process. Reads the SAME shared memory region
-    and feeds every order into the compiled Cython engine."""
+    and feeds every order into the compiled Cython engine's real
+    price-time priority matching (Day 5) --- trades execute when
+    prices cross, not just sorted insertion."""
     from order_book import OrderBookCython  # the compiled .so
 
     rb = RingBuffer(capacity=RING_BUFFER_CAPACITY, create=False)
@@ -82,7 +86,7 @@ def matcher_process():
             time.sleep(0.02)
             continue
 
-        book.insert_order(order)
+        result = book.match_order(order)
         levels = book.get_top_levels(depth=3)
         best_bid = levels["bids"][0]["price"] if levels["bids"] else None
         best_ask = levels["asks"][0]["price"] if levels["asks"] else None
@@ -90,6 +94,12 @@ def matcher_process():
               f"order #{order['order_id']:<4} {order['side']} "
               f"{order['quantity']:>3} @ {order['price']:.2f}   "
               f"| best bid: {best_bid}  best ask: {best_ask}")
+
+        for trade in result["trades"]:
+            print(f"[matcher   pid={os.getpid()}] TRADE  "
+                  f"#{trade['trade_id']} — buy #{trade['buy_order_id']} x "
+                  f"sell #{trade['sell_order_id']}  "
+                  f"{trade['quantity']} @ {trade['price']:.2f}")
 
 
 def main():
