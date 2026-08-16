@@ -28,9 +28,9 @@ Members B and C are no longer contributing. All work below is solo.
 | Module | Spec requirement | Status |
 |---|---|---|
 | `shared/` — mmap ring buffer | Zero-copy, raw `struct`, no pickle | Done — confirmed spec-compliant as built, no changes needed |
-| `matching_engine/` — Cython engine | `.pyx`, C-structs/C-types, no GIL/GC in hot path | In progress — real matching logic done (Day 5), GC/object-stripping optimization pass Day 6 |
+| `matching_engine/` — Cython engine | `.pyx`, C-structs/C-types, no GIL/GC in hot path | Done for this phase — matching logic (Day 5) + GC-free C-array storage (Day 6) both verified with tests. Further C-level optimization pass Day 10. |
 | `simulator/` — asyncio firehose | asyncio, 100,000 orders/sec target | Done for this phase — hits ~100k/sec target on single-core sandbox (see Day 4 benchmark). Real websocket data source not in scope; noted honestly in Day 3 entry. |
-| `dashboard/` — curses latency UI | Terminal UI, live Bid/Ask, μs latency | Not started |
+| `dashboard/` — curses latency UI | Terminal UI, live Bid/Ask, μs latency | In progress — live Bid/Ask + whale highlighting done (Day 7), μs latency instrumentation Day 12-13 |
 | Trade ledger (SQLite/ClickHouse) | Async flush from mmap buffer | Not started |
 | IPC audit (1M orders, 2 processes) | Prove zero-copy, no Pickle bottleneck | Not started |
 
@@ -45,9 +45,9 @@ Members B and C are no longer contributing. All work below is solo.
 | 3 | 1 | DONE - asyncio market firehose (simulator/market_firehose.py) - replaces the synchronous generation loop with an async event loop, start/stop/pause/resume, bounded backoff on a full buffer |
 | 4 | 1 | DONE - Throughput push: benchmarked each layer separately, found and fixed a real bottleneck (per-order asyncio.sleep scheduling overhead), rewrote firehose to batch orders per tick. Result: ~55k/sec -> ~100k/sec on a single-core sandbox, matching the spec target |
 | 5 | 2 | DONE - Real price-time priority matching in the Cython engine: full match, partial match, multi-level book walking, time priority at equal price. Demo updated to show live trade execution. |
-| 6 | 2 | Strip remaining Python object interaction from the matching loop; confirm no GC triggers during a match |
-| 7 | 2 | curses terminal dashboard — live Bid/Ask top-of-book display |
-| 8 | 2 | Mid-Project Review: IPC audit — 1M orders between two real OS processes, no Pickle, prove zero-copy holds under load |
+| 6 | 2 | DONE - Rewrote internal storage as fixed-capacity C struct arrays (no Python dicts/lists in the hot path). Added GC-safety instrumentation tests proving zero Python-object allocation during matching. Found and fixed a real buffer-overflow bug during the stress test itself. |
+| 7 | 2 | DONE - Real curses terminal dashboard: live Bid/Ask top-of-book, running order/trade counts, whale-trade highlighting. Verified via a pseudo-terminal session (sandbox has no real TTY for automated curses testing) plus 7 unit tests on the extracted, curses-independent logic. |
+| 8 | 2 | DONE - Mid-Project Review IPC audit: 1,000,000 orders between two real OS processes. Found and fixed TWO real bugs along the way: (1) the shared-memory lock never actually synchronized across independently-started processes, causing silent data loss; (2) a multiprocessing.Queue deadlock from joining child processes before draining a large result payload. Audit now passes cleanly: 1M/1M received, zero loss, zero duplicates, correct ordering, ~130k orders/sec. |
 | 9 | 2 | Mid-Project Review: Engine verification — automated proof a Buy instantly matches a corresponding Sell |
 | 10 | 3 | C-level optimization pass on the matching loop |
 | 11 | 3 | GC-pause verification: instrument gc stats, prove zero collections trigger during a trade |

@@ -24,13 +24,15 @@ What this actually demonstrates (nothing here is faked or simulated):
 
 What this demo does NOT yet show (honestly, not built yet --- see
 TASKS.md for the day it's scheduled):
-   - the curses live dashboard (Day 7) --- this script prints to plain
-     stdout instead
    - nanosecond latency measurement (Day 12-13)
-   - GC-pause verification during matching (Day 6)
+   - GC-pause verification during matching is done (Day 6) but not
+     surfaced in this demo's output
    - the demo uses a small, readable order rate on purpose (Day 4's
      asyncio firehose can sustain ~100k/sec, see benchmarks/), so the
      output here stays watchable rather than scrolling by instantly
+
+For the live curses dashboard (Day 7) instead of plain stdout, see
+run_dashboard_demo.py.
 
 Run:
     python setup_demo.py     (one-time, builds the Cython extension)

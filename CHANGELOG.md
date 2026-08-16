@@ -350,3 +350,253 @@ matching loop; confirm no GC triggers during a match").
 `pytest -v` → 48/48 passing (36 previous + 12 new matching tests).
 All Day 2 Cython tests (`test_order_book_cython.py`) still pass
 unmodified.
+
+## Day 6 — Leader: GC-free matching engine (C struct arrays), found and fixed a memory corruption bug
+
+### What changed
+Full internal rewrite of `matching_engine/order_book.pyx`. Through
+Day 5, orders were stored as Python dicts inside Python lists —
+every insert/match touched real Python objects (dict lookups, list
+`.insert()`/`.pop(0)`, a fresh dict per trade). That's exactly what
+the garbage collector tracks, so the spec's "guarantee the GC never
+triggers during a trade" requirement was NOT actually met by Day 5,
+despite the comparisons already using C types.
+
+Day 6 replaces internal storage with two fixed-capacity C arrays of
+a plain `COrder` struct (`_buy_orders`, `_sell_orders`), allocated
+once via `PyMem_Malloc` in `__cinit__` and freed once in
+`__dealloc__` — no PyObject anywhere in them. A third C array
+(`_trades_c`) holds recorded trades the same way. The actual
+insertion (`_insert_c`) and matching (`_match_c`) logic now operate
+ENTIRELY on these arrays — no dict access, no list method calls, no
+per-trade object allocation — and are marked `nogil`, since they make
+no Python C-API calls.
+
+The public API (`insert_order()`, `match_order()`, `get_top_levels()`,
+`get_last_trade()`, the `buy_side`/`sell_side`/`trades` properties)
+still accepts and returns Python dicts, for compatibility with every
+existing test and `run_demo.py`. Converting a C struct to a dict for
+a caller who explicitly asked for one happens ONLY at that edge, once
+per call — never inside the matching loop itself. This is the
+standard pattern for bridging a GC-free hot path to a Python-friendly
+public API, and is documented at length in the module's own docstring.
+
+### A real bug found while writing the verification test
+Writing `test_gc_safety.py`'s 200,000-iteration stress test surfaced
+a genuine, serious bug: the original `_insert_c()` had no bounds
+check against `MAX_BOOK_DEPTH` (100,000). An early version of the
+stress test's order mix caused one side of the book to accumulate
+unbounded resting inventory, silently writing past the end of the
+pre-allocated C array once it exceeded capacity — this corrupted
+adjacent heap memory without crashing immediately. The crash only
+surfaced later, on a completely unrelated subsequent call
+(`Fatal Python error: Aborted`), which made it non-obvious at first
+that the real cause was upstream in the earlier loop.
+
+Root cause traced by inspecting book state after the stress loop
+(`len(book.sell_side)` = 100,001 — one over capacity) rather than
+guessing from the crash site. Fixed two things:
+1. `_insert_c()` now checks capacity and returns `False` (dropping
+   the order) instead of writing out of bounds — documented as a
+   placeholder policy, not a real capacity-management design (a
+   production version would need to reject upstream, widen depth, or
+   evict a price level instead of silently dropping).
+2. The stress test itself was redesigned so every iteration actually
+   matches against a seeded, effectively-infinite resting order on
+   both sides, instead of letting unmatched orders pile up as new
+   resting inventory indefinitely.
+
+A dedicated regression test (`test_book_depth_capacity_guard_prevents_overflow`)
+now reproduces the overflow scenario directly and confirms the guard
+holds and the engine stays in a valid, usable state afterward.
+
+### Added
+- `matching_engine/tests/test_gc_safety.py` — 5 tests:
+  - Allocated-block-count comparison (pure-C matching path vs. a
+    no-op baseline of the same iteration count) over 200,000 cycles
+  - `gc.get_stats()` collection-count comparison with the collector
+    disabled, confirming no reliance on GC cleanup
+  - Correctness spot-check of the pure-C entry point
+    (`run_c_only_matching_cycle`)
+  - Correctness spot-check of the public dict-based API, confirming
+    the internal rewrite didn't change external behavior
+  - Regression test for the capacity-overflow bug described above
+- `run_c_only_matching_cycle()`: new public method that runs a full
+  insert-or-match cycle using ONLY the C struct path — no dict is
+  created or read anywhere in the call — used by the GC-safety tests
+  to measure the actual hot loop rather than the convenience wrapper.
+
+### Verified
+- All 17 pre-existing Cython tests (Day 2 + Day 5) pass UNMODIFIED
+  against the rewritten internals — the public dict-based behavior is
+  fully preserved.
+- `run_demo.py` re-run end to end after the rewrite: two real
+  processes, real trades executing, no behavior change from the
+  user's perspective.
+- Rough throughput check of the pure-C path alone (bypassing IPC
+  entirely): ~2.39 million matching cycles/sec on this benchmark
+  machine. Not directly comparable to Day 4's ~100k/sec end-to-end
+  IPC throughput number — this measures the matching engine in
+  isolation, not the full pipeline.
+
+### Tests
+`pytest -v` → 53/53 passing (48 previous + 5 new GC-safety tests).
+
+## Day 7 — Member C: real curses terminal dashboard
+
+### Added
+- `dashboard/live_dashboard.py`: `run_dashboard()` — a real, separate
+  OS process that reads orders from the shared-memory ring buffer,
+  matches them with the real compiled Cython engine, and renders a
+  live curses display: top 5 bid/ask levels, last trade, running
+  orders-processed/trades-matched counts, and highlighted "whale"
+  trades (quantity >= 50, per spec: "visually highlight when a
+  massive Whale order clears multiple price levels"). Replaces the
+  old `dashboard_starter.py` skeleton, which is now removed.
+- `format_whale_line()` / `update_whale_lines()`: whale-detection and
+  rolling-history logic extracted into pure functions with no curses
+  dependency, specifically so they're unit-testable.
+- `run_dashboard_demo.py`: one-command runner — starts a silent
+  generator process (no stdout prints, since curses owns the
+  terminal) alongside the dashboard process.
+- `dashboard/tests/test_dashboard_logic.py` — 7 tests covering whale
+  detection (threshold boundary, mixed batches, newest-first
+  ordering, history capping, empty-batch no-op).
+
+### Testing note --- important limitation, stated honestly
+This sandbox has no real TTY. `curses.wrapper()` requires terminal
+control (`cbreak()`/`nocbreak()`) that fails outside one — confirmed
+directly:
+```
+_curses.error: cbreak() returned ERR
+```
+This means the actual curses RENDERING could not be verified through
+pytest in this environment. Two things were done instead:
+1. The decision-making logic (whale detection, history management)
+   was extracted into pure functions with no curses dependency, so
+   THAT part has real automated test coverage (7 tests above).
+2. The full dashboard was run through a pseudo-terminal (`script -qc`)
+   to get a real TTY. This is genuine execution, not a mock — it
+   produced real curses escape sequences, live-updating bid/ask
+   values, incrementing order/trade counts, and multiple correctly
+   formatted "WHALE:" highlight lines during a real run. Confirmed
+   clean process exit (code 0) after the full configured duration,
+   and no crash or orphaned processes when tested under an
+   artificially narrow terminal.
+
+This is real verification, but it is manual verification of one run,
+not an automated regression test that runs on every future change —
+worth knowing if this environment's TTY limitation isn't present
+wherever this project runs next (a normal terminal on a dev machine
+has a real TTY and `pytest` there could exercise curses directly, if
+that coverage is wanted later).
+
+### Removed
+- `dashboard_starter.py` (repo root) — the pre-spec-pivot skeleton
+  this file's own "WHAT TO DO NEXT" comments described building
+  toward. That progression is now done for real in
+  `dashboard/live_dashboard.py`.
+
+### Tests
+`pytest -v` → 60/60 passing (53 previous + 7 new dashboard logic
+tests). Curses rendering itself verified manually via pseudo-terminal,
+not via this count — see testing note above.
+
+## Day 8 — Mid-Project Review: 1,000,000-order IPC audit, found and fixed TWO real bugs
+
+### The task
+Per spec: "Prove the zero-copy architecture works by sending 1M
+orders between two Python processes without hitting the CPU
+bottleneck of Pickling." Built `audits/ipc_audit.py`: a real producer
+process and a real consumer process, communicating only through the
+shared-memory ring buffer, verifying not just throughput but
+completeness (every order arrives exactly once) and ordering (arrives
+in the exact sequence written).
+
+### Bug #1: the shared-memory lock never actually worked across processes
+`shared/shared_memory.py`'s `SharedRingMemory.__init__` did
+`self.lock = Lock()` (`multiprocessing.Lock`). That primitive only
+synchronizes processes that share the SAME Lock object (e.g. passed
+explicitly at process creation, or inherited via fork from a common
+parent). Every process in this project instead independently
+constructs its own `RingBuffer()` by opening the same backing file
+path — so every process got its OWN separate Lock, providing zero
+real cross-process mutual exclusion. This bug existed since Day 1.
+
+**How it was found:** a 20,000-order manual test before writing the
+real audit script. The consumer permanently stalled at 13,840 orders
+received (out of 20,000) and never recovered — no exception, no
+crash, just silently stuck. Root-caused by inspecting the actual
+book/buffer state rather than guessing.
+
+**First fix attempt (kept for the record, then improved):** a lock
+file acquired via atomic exclusive creation (`os.O_CREAT | O_EXCL`).
+Correct, but slow — real filesystem create/delete syscalls on every
+single lock acquisition. Single-process timing: ~34,700 write+read
+cycles/sec. The real two-process 1,000,000-order audit did not finish
+within a 180-second timeout using this approach.
+
+**Final fix:** genuine OS-native advisory file locking on an
+already-open file descriptor — `fcntl.flock` on POSIX, `msvcrt.locking`
+on Windows, selected automatically via `sys.platform`. This is the
+standard, fast, atomic tool for this exact job on each platform, and
+locks/unlocks an existing fd instead of creating/deleting a file each
+time. Single-process timing improved to ~143,000 write+read cycles/sec
+(a ~4x improvement over the file create/delete approach). Also
+auto-releases if a process crashes while holding the lock, since the
+OS drops the lock when the file descriptor closes — no stale-lock
+cleanup logic needed, unlike the first attempt.
+
+### Bug #2: multiprocessing.Queue deadlock (join-before-drain)
+After fixing the lock, the audit script would run correctly (confirmed
+via progress logging: all orders flowing through the ring buffer
+correctly) but then hang indefinitely after the data transfer
+finished. Root cause: the script called `producer.join()` and
+`consumer.join()` BEFORE draining `result_queue` — a well-known
+`multiprocessing` deadlock hazard. The consumer process puts a large
+payload on the queue (a list of up to 1,000,000 order ids); the queue
+is backed by a pipe with a background feeder thread, and if the
+pipe's OS buffer fills before the parent reads it, the child blocks
+trying to write while the parent's `join()` blocks waiting for the
+child to exit — neither side can proceed.
+
+**Fix:** drain the queue BEFORE calling `join()`, not after. Applied
+in both `audits/ipc_audit.py` and the new regression test
+(`tests/test_cross_process_locking.py`), with the reasoning documented
+inline at both call sites so it doesn't get silently reintroduced by
+a future edit that looks like a harmless reordering.
+
+### Results (this benchmark machine — confirmed 1-core sandbox)
+Two consecutive full 1,000,000-order runs:
+| Run | Sent | Received | Missing | Duplicated | Ordered | End-to-end rate |
+|---|---|---|---|---|---|---|
+| 1 | 1,000,000 | 1,000,000 | 0 | 0 | True | 128,642/sec |
+| 2 | 1,000,000 | 1,000,000 | 0 | 0 | True | 131,470/sec |
+
+Both runs: `AUDIT PASSED`, exit code 0.
+
+### Added
+- `audits/ipc_audit.py` — the full 1,000,000-order audit, with live
+  progress reporting and `IPC_AUDIT_ORDERS` env var override for
+  smaller diagnostic runs
+- `tests/test_cross_process_locking.py` — automated regression test
+  at a CI-friendly 20,000-order scale (large enough to reliably
+  reproduce the old race if it regressed, small enough to run in
+  under a second), so a future accidental regression is caught by
+  routine `pytest` runs, not only by remembering to run the full
+  manual audit
+
+### Verified after the fix
+- All 60 pre-existing tests (Days 1-7) still pass unmodified
+- `run_demo.py` and `run_dashboard_demo.py` re-run end to end,
+  confirmed still working correctly with the new locking mechanism
+
+### Tests
+`pytest -v` → 61/61 passing (60 previous + 1 new cross-process
+locking regression test).
+
+### Honesty note
+This is a single-core sandbox (confirmed via `nproc` = 1), not
+dedicated hardware — same caveat as Day 4's benchmark. The ~130k/sec
+end-to-end IPC rate is what this specific environment achieves once
+both bugs were fixed, not a production hardware guarantee.

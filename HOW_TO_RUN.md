@@ -70,7 +70,7 @@ presentation.
 pytest -v
 ```
 
-28 tests should currently pass. `matching_engine/tests/` will skip
+61 tests should currently pass. `matching_engine/tests/` will skip
 with a clear message (not fail) if you haven't run the build step
 above yet.
 
@@ -82,12 +82,33 @@ python -m shared.ring_buffer               # (importable only, no __main__ demo 
 python -m simulator.order_generator        # order generation smoke test (still used internally by market_firehose.py)
 python -m simulator.market_firehose        # asyncio firehose smoke test (Day 3), ~3s at 50 orders/sec
 python benchmarks/throughput_benchmark.py  # Day 4: layer-by-layer throughput measurement, ~10s
+python audits/ipc_audit.py                 # Day 8: 1,000,000-order Mid-Project Review IPC audit, ~8-30s depending on hardware
 ```
 
-`simulator_starter.py` and `dashboard_starter.py` (repo root) are
-leftover from the very first skeleton, before the company spec was
-issued — both are broken imports and will be removed once the real
-`simulator/` (asyncio) and `dashboard/` (curses) packages replace them.
+`simulator_starter.py` (repo root) is leftover from the very first
+skeleton, before the company spec was issued — it's a broken import
+and will be removed once the real `simulator/` (asyncio) package
+fully replaces its role. `dashboard_starter.py` has already been
+removed (Day 7) — its role is now `dashboard/live_dashboard.py`, a
+real implementation, not a placeholder.
+
+## 5b. Run the live curses dashboard
+
+```
+python run_dashboard_demo.py
+```
+
+Starts a generator process + the real curses dashboard, both reading
+from/writing to the shared-memory ring buffer. Shows a live Bid/Ask
+order book, running totals, and highlights any trade at or above 50
+units of quantity as a "whale" trade. Runs 20 seconds by default, or
+press Ctrl+C to exit early.
+
+**Note:** curses needs a real terminal (TTY) to render — it will not
+work if piped through something that isn't one (e.g. some CI
+environments, some IDE "run" panels that don't allocate a real
+terminal). If you see a `cbreak() returned ERR` error, run it directly
+in Command Prompt/PowerShell/a real terminal window instead.
 
 ## 6. Project structure
 
@@ -97,7 +118,7 @@ issued — both are broken imports and will be removed once the real
 | `matching_engine/` | Cython Limit Order Book | Cython Matching Engine |
 | `engine/` | Pure-Python reference implementation, used to verify the Cython version's correctness | — |
 | `simulator/` | Order generation (asyncio firehose, in progress) | Market Simulator |
-| `dashboard/` | curses terminal latency UI (not started) | Latency Monitor |
+| `dashboard/` | curses terminal latency UI (live Bid/Ask done Day 7; latency numbers Day 12-13) | Latency Monitor |
 | `archive_web_dashboard/` | Earlier self-directed plan (FastAPI + web UI), kept for reference, not part of the active deliverable | — |
 
 ## Troubleshooting
