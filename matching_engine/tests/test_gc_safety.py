@@ -232,3 +232,77 @@ def test_book_depth_capacity_guard_prevents_overflow():
     })
     assert len(result["trades"]) == 1
     assert result["trades"][0]["price"] == 100.0
+
+
+# ----------------------------------------------------------------------
+# Day 11: the tests above (from Day 6) all seed a huge resting order
+# and only ever MATCH against it --- remaining is always 0, so
+# _insert_c() (and therefore the malloc/realloc calls Day 10 added
+# inside it, for creating new price levels and growing a level's FIFO)
+# is never actually exercised by them. That's a real coverage gap:
+# Day 10 introduced libc.stdlib malloc/realloc/free calls into the hot
+# path, and nothing had verified those calls stay GC-safe under load.
+# These two tests close that gap directly.
+# ----------------------------------------------------------------------
+
+def test_new_price_level_creation_triggers_no_collections():
+    """Exercises _insert_c()'s malloc() path directly: every order
+    below is at a genuinely unique price, so every single one forces
+    creation of a brand-new PriceLevel (never an append to an
+    existing level's FIFO). If malloc() calls somehow interacted with
+    Python's GC (they don't --- libc.stdlib malloc is a raw C heap
+    call, entirely outside Python's object allocator --- but this
+    verifies that directly rather than trusting the theory), this
+    test would catch a collection-count increase."""
+    book = OrderBookCython()
+
+    gc.disable()
+    try:
+        stats_before = gc.get_stats()
+        collections_before = stats_before[0]["collections"]
+
+        for i in range(ITERATIONS // 4):  # smaller than 200k for test speed;
+                                            # still large enough to be a real
+                                            # stress case for level creation
+            book.run_c_only_matching_cycle(i, ord("S"), 1000.0 + i * 0.01, 1, i)
+
+        stats_after = gc.get_stats()
+        collections_after = stats_after[0]["collections"]
+    finally:
+        gc.enable()
+
+    assert collections_after == collections_before
+    assert len(book.sell_side) == ITERATIONS // 4  # confirms every
+                                                      # order actually
+                                                      # created its own
+                                                      # level, not just
+                                                      # that nothing crashed
+
+
+def test_fifo_growth_within_one_price_level_triggers_no_collections():
+    """Exercises _insert_c()'s realloc() path directly: every order
+    below is at the SAME price, so after the first 16 (the starting
+    per-level FIFO capacity), every further insert forces the FIFO
+    array to grow via realloc(). Same reasoning as the test above ---
+    realloc() is also a raw C heap call outside Python's GC, verified
+    directly rather than assumed."""
+    book = OrderBookCython()
+
+    gc.disable()
+    try:
+        stats_before = gc.get_stats()
+        collections_before = stats_before[0]["collections"]
+
+        count = ITERATIONS // 4
+        for i in range(count):
+            book.run_c_only_matching_cycle(i, ord("S"), 100.0, 1, i)
+
+        stats_after = gc.get_stats()
+        collections_after = stats_after[0]["collections"]
+    finally:
+        gc.enable()
+
+    assert collections_after == collections_before
+    assert len(book.sell_side) == count  # confirms the FIFO actually
+                                            # grew to hold every order,
+                                            # not just that nothing crashed

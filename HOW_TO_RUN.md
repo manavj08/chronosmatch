@@ -70,7 +70,7 @@ presentation.
 pytest -v
 ```
 
-61 tests should currently pass. `matching_engine/tests/` will skip
+78 tests should currently pass. `matching_engine/tests/` will skip
 with a clear message (not fail) if you haven't run the build step
 above yet.
 
@@ -83,6 +83,8 @@ python -m simulator.order_generator        # order generation smoke test (still 
 python -m simulator.market_firehose        # asyncio firehose smoke test (Day 3), ~3s at 50 orders/sec
 python benchmarks/throughput_benchmark.py  # Day 4: layer-by-layer throughput measurement, ~10s
 python audits/ipc_audit.py                 # Day 8: 1,000,000-order Mid-Project Review IPC audit, ~8-30s depending on hardware
+python audits/engine_verification.py       # Day 9: Buy/Sell matching verification + latency report, ~1-2s
+python benchmarks/level_bucketing_benchmark.py  # Day 10: price-level bucketing benchmark (realistic vs adversarial), ~1s
 ```
 
 `simulator_starter.py` (repo root) is leftover from the very first

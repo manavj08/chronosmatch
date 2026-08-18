@@ -4,45 +4,34 @@ matching_engine/order_book.pyx
 --------------------------------
 CYTHON LIMIT ORDER BOOK.
 
-Day 2: first working .pyx compiled to a real C-extension. Ports the
-sorted-insertion logic that used to live in engine/order_book.py
-(pure Python), but with statically-typed C variables instead of
-Python objects.
-
+Day 2: first working .pyx compiled to a real C-extension.
 Day 5: real Price-Time Priority matching (crossing) added.
+Day 6: rewrote internal storage to C struct arrays --- no Python
+objects, no GC tracking, in the matching loop.
 
-Day 6: THIS is the day the spec's actual requirement gets met ---
-"removing all Python object interactions inside the matching loop to
-guarantee the Garbage Collector never triggers during a trade."
+Day 10: C-LEVEL OPTIMIZATION PASS. Profiling (see
+benchmarks/level_bucketing_benchmark.py) found a real bottleneck in
+the Day 6 design: each side of the book was ONE flat sorted array of
+individual orders. Inserting a new order meant a binary search over
+every order (fine, O(log n)) followed by an array shift (memmove) to
+make room --- O(n) in the worst case, since every order behind the
+insertion point has to move. Measured on this benchmark machine:
+worst-case adversarial insertion (unique price every time, always the
+best price) degraded from ~235,000 inserts/sec at shallow depth to
+~14,500 inserts/sec at 99,000 resting orders --- a ~16x slowdown.
 
-What changed and why:
-
-Through Day 5, orders were stored as Python dicts inside Python
-lists. Every insert/match touched real Python objects: dict lookups
-(order["price"]), list .insert()/.pop(0) calls, and a fresh dict
-allocated for every single trade. All of that is exactly what the GC
-tracks --- so even though the comparisons used C types, the STORAGE
-itself was still fully within the GC's view. That does not satisfy
-the spec.
-
-Day 6 replaces internal storage with two fixed-capacity C arrays of
-a plain C struct (COrder) --- no PyObject anywhere in them. Insertion,
-matching, and trade recording (_match_c) now operate ENTIRELY on
-these arrays: no dict access, no list method calls, no per-trade
-object allocation. Trades are also recorded into a fixed-capacity C
-array of a CTrade struct, not a Python dict.
-
-The public API (insert_order(), match_order(), get_top_levels(),
-get_last_trade(), the buy_side/sell_side properties) still accepts
-and returns Python dicts, because the rest of the codebase (tests,
-run_demo.py, the eventual dashboard) needs that. Converting a C
-struct to a dict for a caller who asked for one IS a Python object
-allocation --- but it only happens at the EDGE, once per call, for
-whatever the caller explicitly requested to see. It never happens
-inside the matching loop itself. That distinction is verified by
-Day 6's GC instrumentation test (test_gc_safety.py), which calls
-run_c_only_matching_cycle() directly (bypassing the dict-conversion
-edge entirely), not the dict-returning wrapper.
+Fix: PRICE-LEVEL BUCKETING, matching how real exchanges structure an
+order book. Each side is now an array of price LEVELS (typically far
+fewer than the number of individual orders --- real markets have a
+bounded number of active price points, even under heavy volume), and
+each level holds its own small FIFO array of orders at that exact
+price. Binary search now operates over LEVELS, not over every order,
+and appending a new order to an existing level's FIFO is O(1)
+amortized (no shift needed --- it goes at the tail). A brand new price
+level still requires a shift of the (much smaller) level array, and a
+level that empties out still requires removing it from that array ---
+both real costs, but bounded by the number of distinct prices instead
+of the number of individual orders.
 
 order_id, quantity, timestamp -> C long long (int64_t)
 price -> C double
@@ -51,14 +40,30 @@ side -> C char ('B' or 'S')
 
 from libc.stdint cimport int64_t
 from libc.string cimport memmove
+from libc.stdlib cimport malloc, realloc, free
 from cpython.mem cimport PyMem_Malloc, PyMem_Free
 
-# Fixed capacity for the C-array-backed book. A real production engine
-# would grow this dynamically or use a different structure entirely for
-# unbounded depth; a fixed cap keeps this file's memory layout simple
-# and is more than enough depth for any realistic order book while
-# still being pure pre-allocated C memory (no per-order malloc).
-DEF MAX_BOOK_DEPTH = 100000
+DEF MAX_PRICE_LEVELS = 100000    # distinct price points per side. Set
+                                  # to match Day 6's MAX_BOOK_DEPTH
+                                  # (100,000) so the rewrite doesn't
+                                  # silently reduce the book's maximum
+                                  # capacity --- an early version of
+                                  # this file used a smaller value
+                                  # (10,000) on the assumption that
+                                  # real books have far fewer distinct
+                                  # prices than individual orders, but
+                                  # re-running the worst-case benchmark
+                                  # after the rewrite (adversarial
+                                  # unique-price-every-order pattern)
+                                  # showed it silently dropped 89,000
+                                  # of 99,000 orders once the level
+                                  # array filled --- a real capacity
+                                  # regression versus Day 6, caught by
+                                  # testing rather than assumed safe.
+DEF INITIAL_LEVEL_CAPACITY = 16  # starting FIFO capacity per price
+                                  # level; grows via realloc() if a
+                                  # single price level gets deeper than
+                                  # this (still pure C, no Python object)
 DEF MAX_TRADES = 1000000
 
 
@@ -68,6 +73,17 @@ cdef struct COrder:
     double price
     int64_t quantity
     int64_t timestamp
+
+
+cdef struct PriceLevel:
+    double price
+    COrder* orders           # FIFO array of orders at this price
+    int64_t count             # number of orders currently in this level
+    int64_t capacity          # allocated size of the orders array
+    int64_t head              # index of the oldest (next to match) order;
+                                # advances on removal instead of shifting
+                                # the whole array on every fill, amortizing
+                                # the cost of removing from the front
 
 
 cdef struct CTrade:
@@ -80,111 +96,187 @@ cdef struct CTrade:
 
 cdef class OrderBookCython:
     """
-    Cython Limit Order Book. Internal storage (Day 6 onward) is two
-    fixed-capacity C arrays of COrder --- no Python objects, no GC
-    tracking, no per-order heap allocation via malloc/free either
-    (the arrays are allocated once, in __cinit__, and reused for the
-    life of the object).
+    Cython Limit Order Book. Day 10 storage: each side is an array of
+    PriceLevel structs (sorted by price), each holding its own FIFO
+    array of COrder structs. No Python objects anywhere in the hot
+    path --- same GC-safety guarantee as Day 6, now with better
+    insertion complexity under deep, many-price-level conditions.
     """
 
-    # Raw C storage --- NOT visible to Python directly. This is the
-    # actual hot-path data; nothing here is a PyObject.
-    cdef COrder* _buy_orders
-    cdef COrder* _sell_orders
-    cdef int64_t _buy_count
-    cdef int64_t _sell_count
+    cdef PriceLevel* _buy_levels
+    cdef PriceLevel* _sell_levels
+    cdef int64_t _buy_level_count
+    cdef int64_t _sell_level_count
 
     cdef CTrade* _trades_c
     cdef int64_t _trade_count
     cdef int64_t _trade_id_counter
 
     def __cinit__(self):
-        self._buy_orders = <COrder*>PyMem_Malloc(MAX_BOOK_DEPTH * sizeof(COrder))
-        self._sell_orders = <COrder*>PyMem_Malloc(MAX_BOOK_DEPTH * sizeof(COrder))
+        self._buy_levels = <PriceLevel*>PyMem_Malloc(MAX_PRICE_LEVELS * sizeof(PriceLevel))
+        self._sell_levels = <PriceLevel*>PyMem_Malloc(MAX_PRICE_LEVELS * sizeof(PriceLevel))
         self._trades_c = <CTrade*>PyMem_Malloc(MAX_TRADES * sizeof(CTrade))
-        self._buy_count = 0
-        self._sell_count = 0
+        self._buy_level_count = 0
+        self._sell_level_count = 0
         self._trade_count = 0
         self._trade_id_counter = 1
 
     def __dealloc__(self):
-        if self._buy_orders is not NULL:
-            PyMem_Free(self._buy_orders)
-        if self._sell_orders is not NULL:
-            PyMem_Free(self._sell_orders)
+        cdef int64_t i
+        if self._buy_levels is not NULL:
+            for i in range(self._buy_level_count):
+                if self._buy_levels[i].orders is not NULL:
+                    free(self._buy_levels[i].orders)
+            PyMem_Free(self._buy_levels)
+        if self._sell_levels is not NULL:
+            for i in range(self._sell_level_count):
+                if self._sell_levels[i].orders is not NULL:
+                    free(self._sell_levels[i].orders)
+            PyMem_Free(self._sell_levels)
         if self._trades_c is not NULL:
             PyMem_Free(self._trades_c)
 
     # ------------------------------------------------------------------
-    # HOT PATH --- pure C, no Python objects, no dict/list access.
-    # This is what Day 6's GC-safety test exercises directly.
+    # HOT PATH --- pure C, no Python objects. Day 10: operates on price
+    # levels + per-level FIFOs instead of one flat per-order array.
     # ------------------------------------------------------------------
 
-    cdef bint _insert_c(self, COrder order) noexcept nogil:
-        """Sorted insertion directly into the C array via binary
-        search + memmove. No Python objects touched at all --- this
-        function makes no Python C-API calls, so it's safe to run
-        with the GIL released (declared nogil).
-
-        Returns False (and drops the order) if the book side is
-        already at MAX_BOOK_DEPTH capacity, rather than writing past
-        the end of the pre-allocated array. This bound check was
-        added after a 200,000-iteration one-sided stress test (see
-        test_gc_safety.py) silently overflowed the sell-side array
-        past its allocated capacity, corrupting adjacent heap memory
-        and causing a later, seemingly-unrelated segfault. A
-        production version would need a real policy here (reject the
-        order upstream, widen the depth, evict the worst price level,
-        etc.) --- dropping silently is a placeholder, tracked for a
-        later day, not a real capacity-management design."""
+    cdef int64_t _find_level_index(self, PriceLevel* levels, int64_t count,
+                                     double price, bint is_buy_side) noexcept nogil:
+        """Binary search for the level at exactly `price`, or the
+        correct insertion index if no such level exists yet. Returns
+        a NEGATIVE encoded value if the exact price wasn't found:
+        -(insertion_index) - 1 (a standard bisect-style encoding),
+        so callers can distinguish 'found at index N' from 'not
+        found, would insert at index N' without a second search."""
         cdef Py_ssize_t lo, hi, mid
-        cdef COrder* arr
-        cdef int64_t* count_ptr
+        lo, hi = 0, count
+        while lo < hi:
+            mid = (lo + hi) // 2
+            if is_buy_side:
+                # Buy levels sorted descending: best (highest) bid first
+                if levels[mid].price == price:
+                    return mid
+                elif levels[mid].price < price:
+                    hi = mid
+                else:
+                    lo = mid + 1
+            else:
+                # Sell levels sorted ascending: best (lowest) ask first
+                if levels[mid].price == price:
+                    return mid
+                elif levels[mid].price > price:
+                    hi = mid
+                else:
+                    lo = mid + 1
+        return -(lo) - 1  # not found; caller decodes insertion index as -(result) - 1
 
-        if order.side == b'B':
-            arr = self._buy_orders
-            count_ptr = &self._buy_count
-        else:
-            arr = self._sell_orders
-            count_ptr = &self._sell_count
+    cdef bint _insert_c(self, COrder order) noexcept nogil:
+        """Insert an order into its price level's FIFO, creating a new
+        level if none exists yet at that exact price. Appending to an
+        existing level's FIFO is O(1) amortized (tail append, no
+        shift). Creating a brand-new level still shifts the level
+        array --- O(number of distinct price levels), not O(number of
+        individual orders), which is the whole point of Day 10's fix.
 
-        if count_ptr[0] >= MAX_BOOK_DEPTH:
+        Day 11 fix: rejects orders with quantity <= 0. Found via
+        edge-case testing: a zero-quantity order could previously be
+        inserted onto the book and would later produce a phantom
+        trade with quantity: 0 when something matched against it ---
+        a fake execution with no real economic meaning. Returns False
+        (order rejected, nothing inserted) for such orders, same
+        signature/convention as the MAX_BOOK_DEPTH capacity guard.
+        """
+        cdef PriceLevel* levels
+        cdef int64_t* level_count_ptr
+        cdef bint is_buy_side = (order.side == b'B')
+        cdef int64_t found_or_neg
+        cdef int64_t idx
+        cdef PriceLevel* lvl
+        cdef COrder* new_orders_array
+        cdef int64_t new_capacity
+
+        if order.quantity <= 0:
             return False
 
-        lo, hi = 0, count_ptr[0]
-        if order.side == b'B':
-            while lo < hi:
-                mid = (lo + hi) // 2
-                if arr[mid].price < order.price:
-                    hi = mid
-                else:
-                    lo = mid + 1
+        if is_buy_side:
+            levels = self._buy_levels
+            level_count_ptr = &self._buy_level_count
         else:
-            while lo < hi:
-                mid = (lo + hi) // 2
-                if arr[mid].price > order.price:
-                    hi = mid
-                else:
-                    lo = mid + 1
+            levels = self._sell_levels
+            level_count_ptr = &self._sell_level_count
 
-        # Shift everything from lo onward right by one slot, then
-        # place the new order at lo. memmove handles overlapping
-        # regions correctly (unlike memcpy).
-        if lo < count_ptr[0]:
-            memmove(&arr[lo + 1], &arr[lo], (count_ptr[0] - lo) * sizeof(COrder))
-        arr[lo] = order
-        count_ptr[0] += 1
-        return True
+        found_or_neg = self._find_level_index(levels, level_count_ptr[0], order.price, is_buy_side)
+
+        if found_or_neg >= 0:
+            # Existing price level --- append to its FIFO tail.
+            idx = found_or_neg
+            lvl = &levels[idx]
+
+            # Compact the FIFO if head has drifted far enough that the
+            # logical array (from head to head+count) would otherwise
+            # need more backing capacity than a compaction would free
+            # up --- keeps a level that fills and drains repeatedly at
+            # the same price from growing its backing array forever.
+            if lvl.head > 0 and (lvl.head + lvl.count) >= lvl.capacity:
+                memmove(&lvl.orders[0], &lvl.orders[lvl.head], lvl.count * sizeof(COrder))
+                lvl.head = 0
+
+            if (lvl.head + lvl.count) >= lvl.capacity:
+                new_capacity = lvl.capacity * 2
+                new_orders_array = <COrder*>realloc(lvl.orders, new_capacity * sizeof(COrder))
+                if new_orders_array == NULL:
+                    return False  # allocation failed; drop the order rather than corrupt state
+                lvl.orders = new_orders_array
+                lvl.capacity = new_capacity
+
+            lvl.orders[lvl.head + lvl.count] = order
+            lvl.count += 1
+            return True
+
+        else:
+            # No level at this price yet --- create one. This is the
+            # part that still costs O(number of price levels): shift
+            # the level array to make room for the new level, same
+            # binary-search-then-memmove pattern as Day 6, just over
+            # LEVELS now instead of individual orders.
+            if level_count_ptr[0] >= MAX_PRICE_LEVELS:
+                return False  # capacity guard, same reasoning as Day 6's overflow fix
+
+            idx = -(found_or_neg) - 1
+
+            if idx < level_count_ptr[0]:
+                memmove(&levels[idx + 1], &levels[idx],
+                        (level_count_ptr[0] - idx) * sizeof(PriceLevel))
+
+            levels[idx].price = order.price
+            levels[idx].orders = <COrder*>malloc(INITIAL_LEVEL_CAPACITY * sizeof(COrder))
+            if levels[idx].orders == NULL:
+                return False
+            levels[idx].orders[0] = order
+            levels[idx].count = 1
+            levels[idx].capacity = INITIAL_LEVEL_CAPACITY
+            levels[idx].head = 0
+            level_count_ptr[0] += 1
+            return True
+
+    cdef void _remove_level_at(self, PriceLevel* levels, int64_t* level_count_ptr,
+                                 int64_t idx) noexcept nogil:
+        """Remove an emptied-out price level from the level array.
+        Frees that level's FIFO backing array, then shifts the
+        remaining levels down --- O(number of price levels), same
+        bound as level creation above."""
+        free(levels[idx].orders)
+        if idx < level_count_ptr[0] - 1:
+            memmove(&levels[idx], &levels[idx + 1],
+                    (level_count_ptr[0] - idx - 1) * sizeof(PriceLevel))
+        level_count_ptr[0] -= 1
 
     cdef void _record_trade_c(self, int64_t buy_order_id, int64_t sell_order_id,
                                 double price, int64_t qty) noexcept nogil:
-        """Append a trade into the pre-allocated C trade array. No
-        dict allocation, no Python object of any kind."""
         cdef CTrade* t
         if self._trade_count >= MAX_TRADES:
-            return  # pre-allocated capacity exhausted; drop silently
-                     # (a production version would grow or flush to
-                     # the database ledger here --- Day 14)
+            return
         t = &self._trades_c[self._trade_count]
         t.trade_id = self._trade_id_counter
         t.buy_order_id = buy_order_id
@@ -196,67 +288,66 @@ cdef class OrderBookCython:
 
     cdef int64_t _match_c(self, COrder incoming) noexcept nogil:
         """
-        THE ACTUAL MATCHING LOOP. Pure C: struct array reads/writes,
-        integer/double comparisons, memmove for removal. No dict, no
-        list, no Python object allocated anywhere in this function.
-
-        Returns the remaining unmatched quantity (0 if fully filled).
-        Produced trades are recorded via _record_trade_c() directly
-        into the C trade array --- the caller reads them back via
-        get_top_levels()/get_last_trade() afterward if it wants a
-        Python view, but nothing here allocates one.
+        Matching loop, Day 10 shape: walks price LEVELS (best first,
+        always index 0) and within each level, walks the FIFO from
+        `head` forward --- oldest order first, correct time priority.
+        A level that empties out is removed via _remove_level_at();
+        a partially-filled order at the front of a level just has its
+        quantity reduced and stays exactly where it is (head doesn't
+        advance until an order is fully consumed).
         """
-        cdef COrder* opposite
-        cdef int64_t* opposite_count
+        cdef PriceLevel* opposite_levels
+        cdef int64_t* opposite_level_count
         cdef int64_t remaining = incoming.quantity
         cdef int64_t fill_qty
         cdef bint crosses
+        cdef bint is_buy_side = (incoming.side == b'B')
+        cdef PriceLevel* lvl
+        cdef COrder* front_order
 
-        if incoming.side == b'B':
-            opposite = self._sell_orders
-            opposite_count = &self._sell_count
+        if is_buy_side:
+            opposite_levels = self._sell_levels
+            opposite_level_count = &self._sell_level_count
         else:
-            opposite = self._buy_orders
-            opposite_count = &self._buy_count
+            opposite_levels = self._buy_levels
+            opposite_level_count = &self._buy_level_count
 
-        while remaining > 0 and opposite_count[0] > 0:
-            # Best price is always index 0 (arrays are kept sorted).
-            if incoming.side == b'B':
-                crosses = opposite[0].price <= incoming.price
+        while remaining > 0 and opposite_level_count[0] > 0:
+            lvl = &opposite_levels[0]  # best price level always at index 0
+
+            if is_buy_side:
+                crosses = lvl.price <= incoming.price
             else:
-                crosses = opposite[0].price >= incoming.price
+                crosses = lvl.price >= incoming.price
 
             if not crosses:
                 break
 
-            fill_qty = remaining if remaining < opposite[0].quantity else opposite[0].quantity
+            front_order = &lvl.orders[lvl.head]
+            fill_qty = remaining if remaining < front_order.quantity else front_order.quantity
 
-            if incoming.side == b'B':
-                self._record_trade_c(incoming.order_id, opposite[0].order_id,
-                                      opposite[0].price, fill_qty)
+            if is_buy_side:
+                self._record_trade_c(incoming.order_id, front_order.order_id, lvl.price, fill_qty)
             else:
-                self._record_trade_c(opposite[0].order_id, incoming.order_id,
-                                      opposite[0].price, fill_qty)
+                self._record_trade_c(front_order.order_id, incoming.order_id, lvl.price, fill_qty)
 
             remaining -= fill_qty
-            opposite[0].quantity -= fill_qty
+            front_order.quantity -= fill_qty
 
-            if opposite[0].quantity <= 0:
-                # Fully consumed: shift the whole array left by one to
-                # remove index 0. memmove handles the overlap safely.
-                if opposite_count[0] > 1:
-                    memmove(&opposite[0], &opposite[1],
-                            (opposite_count[0] - 1) * sizeof(COrder))
-                opposite_count[0] -= 1
-            # else: partially filled, stays at index 0 with reduced
-            # quantity --- correct time priority, no array shift needed.
+            if front_order.quantity <= 0:
+                lvl.head += 1
+                lvl.count -= 1
+                if lvl.count == 0:
+                    self._remove_level_at(opposite_levels, opposite_level_count, 0)
+            # else: partially filled, stays at the front of the FIFO
+            # (head unchanged) with reduced quantity --- correct time
+            # priority, no shift needed.
 
         return remaining
 
     # ------------------------------------------------------------------
-    # PYTHON-FACING API --- dict in, dict out, exactly like Day 5.
-    # Conversion between COrder/CTrade structs and Python dicts happens
-    # ONLY here, at the edge, never inside _insert_c/_match_c above.
+    # PYTHON-FACING API --- dict in, dict out. Same public shape as
+    # Day 6; conversion happens only at this edge, never in the hot path.
     # ------------------------------------------------------------------
 
     cdef COrder _order_from_dict(self, dict order):
@@ -279,23 +370,10 @@ cdef class OrderBookCython:
         }
 
     cpdef void insert_order(self, dict order):
-        """Public API: accepts a dict (for compatibility with the rest
-        of the codebase), converts to a C struct at this one edge, and
-        calls the pure-C insertion function."""
         cdef COrder c_order = self._order_from_dict(order)
         self._insert_c(c_order)
 
     cpdef dict match_order(self, dict order):
-        """
-        Public API: real Price-Time Priority matching. Returns:
-            {"trades": [list of trade dicts produced], "resting": bool}
-
-        The actual matching work happens in _match_c() (pure C, no
-        Python objects). This wrapper converts the incoming dict to a
-        C struct, calls _match_c(), and converts whatever trades were
-        produced back to dicts ONLY for the return value --- the
-        matching decisions themselves never touched a dict.
-        """
         cdef COrder c_order = self._order_from_dict(order)
         cdef int64_t trades_before = self._trade_count
         cdef int64_t remaining = self._match_c(c_order)
@@ -321,22 +399,34 @@ cdef class OrderBookCython:
 
     @property
     def buy_side(self):
-        """Python-facing view of the buy side, built fresh from the C
-        array on access. NOT the hot-path storage itself --- this
-        property exists for compatibility with code/tests that expect
-        a list of dicts (unchanged public shape since Day 2), and for
-        the eventual dashboard. Calling this allocates Python dicts;
-        the matching loop itself never does."""
-        return [self._order_to_dict(self._buy_orders[i]) for i in range(self._buy_count)]
+        """Python-facing view, built fresh from the level+FIFO C
+        storage on access --- same public shape as Day 6 (a flat list
+        of order dicts, best price first, correct time priority
+        within each price), just assembled from levels now instead of
+        one flat array."""
+        cdef list result = []
+        cdef int64_t i, j
+        cdef PriceLevel* lvl
+        for i in range(self._buy_level_count):
+            lvl = &self._buy_levels[i]
+            for j in range(lvl.head, lvl.head + lvl.count):
+                result.append(self._order_to_dict(lvl.orders[j]))
+        return result
 
     @property
     def sell_side(self):
         """See buy_side docstring --- same tradeoff, opposite side."""
-        return [self._order_to_dict(self._sell_orders[i]) for i in range(self._sell_count)]
+        cdef list result = []
+        cdef int64_t i, j
+        cdef PriceLevel* lvl
+        for i in range(self._sell_level_count):
+            lvl = &self._sell_levels[i]
+            for j in range(lvl.head, lvl.head + lvl.count):
+                result.append(self._order_to_dict(lvl.orders[j]))
+        return result
 
     @property
     def trades(self):
-        """Python-facing view of all recorded trades. See buy_side."""
         return [
             {
                 "trade_id": self._trades_c[i].trade_id,
@@ -349,12 +439,26 @@ cdef class OrderBookCython:
         ]
 
     cpdef dict get_top_levels(self, int depth=5):
-        cdef int64_t n_bids = min(depth, self._buy_count)
-        cdef int64_t n_asks = min(depth, self._sell_count)
-        return {
-            "bids": [self._order_to_dict(self._buy_orders[i]) for i in range(n_bids)],
-            "asks": [self._order_to_dict(self._sell_orders[i]) for i in range(n_asks)],
-        }
+        """Returns the top N PRICE LEVELS per side (not N individual
+        orders) --- same public contract as Day 6 had, since Day 6's
+        flat-array design also effectively showed one entry per order
+        at the front of the array; here, each level's own FRONT order
+        (the next one to match) represents that level in the top-N
+        view, keeping the same dashboard-facing shape (a list of
+        dicts with price/quantity/etc, best first)."""
+        cdef dict result = {"bids": [], "asks": []}
+        cdef int64_t n_bid_levels = min(depth, self._buy_level_count)
+        cdef int64_t n_ask_levels = min(depth, self._sell_level_count)
+        cdef int64_t i
+        cdef PriceLevel* lvl
+
+        for i in range(n_bid_levels):
+            lvl = &self._buy_levels[i]
+            result["bids"].append(self._order_to_dict(lvl.orders[lvl.head]))
+        for i in range(n_ask_levels):
+            lvl = &self._sell_levels[i]
+            result["asks"].append(self._order_to_dict(lvl.orders[lvl.head]))
+        return result
 
     cpdef dict get_last_trade(self):
         if self._trade_count == 0:
@@ -368,27 +472,14 @@ cdef class OrderBookCython:
             "quantity": t.quantity,
         }
 
-    # ------------------------------------------------------------------
-    # Day 6 GC-safety verification helper. See
-    # matching_engine/tests/test_gc_safety.py --- this method runs
-    # matching ENTIRELY through the C path (no dict conversion at all,
-    # not even at the edge) so the GC-pause test measures the actual
-    # hot loop, not the Python-facing convenience wrapper.
-    # ------------------------------------------------------------------
     cpdef int64_t run_c_only_matching_cycle(self, int64_t order_id, int side,
                                               double price, int64_t quantity,
                                               int64_t timestamp):
         """Full insert-or-match cycle for one order, using ONLY the C
         struct path --- no dict is created or read anywhere in this
-        call. `side` is an int here (ord('B') or ord('S')) since cpdef
-        methods callable from pure Python can't take a raw C char
-        parameter directly.
-
-        Mirrors what match_order() does (match against the opposite
-        side, then insert any unmatched remainder onto this order's
-        own side) so this is a realistic full order-processing cycle
-        for the GC-safety benchmark, not just a partial operation.
-        Returns remaining unmatched quantity (0 if fully filled)."""
+        call. Mirrors match_order()'s shape (match, then insert any
+        remainder). Returns remaining unmatched quantity (0 if fully
+        filled)."""
         cdef COrder c_order
         c_order.order_id = order_id
         c_order.side = <char>side

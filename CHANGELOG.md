@@ -600,3 +600,253 @@ This is a single-core sandbox (confirmed via `nproc` = 1), not
 dedicated hardware — same caveat as Day 4's benchmark. The ~130k/sec
 end-to-end IPC rate is what this specific environment achieves once
 both bugs were fixed, not a production hardware guarantee.
+
+## Day 9 — Mid-Project Review: Engine Verification (Buy/Sell matching, measured latency)
+
+### What this adds beyond Day 5's tests
+Day 5's `matching_engine/tests/test_matching.py` already proves
+matching correctness thoroughly (12 tests) --- but every one of those
+tests calls `match_order()` directly on an in-memory dict literal.
+Day 9 covers the two things that approach doesn't:
+
+1. **Correctness through the REAL pipeline** — orders enter via
+   `RingBuffer.write_order()` (the same entry point real order flow
+   uses) and are read back via `read_order()` before being matched,
+   not constructed and handed straight to `match_order()`.
+2. **"Instantly", actually measured** — wall-clock latency from
+   `write_order()` to a trade being recorded, using
+   `time.perf_counter_ns()`, reported as real percentiles rather than
+   asserted as a pass/fail threshold.
+
+### Added
+- `audits/engine_verification.py` — standalone report script (same
+  style as Day 8's `ipc_audit.py`): confirms one Buy matches a
+  resting Sell through the real pipeline, then measures latency
+  across 10,000 buy/sell pairs and reports min/mean/p50/p99/max.
+- `matching_engine/tests/test_engine_verification.py` — 4 automated
+  pytest tests: Buy-matches-Sell and Sell-matches-Buy through the
+  real pipeline, a 20-cycle repeated-match correctness check (guards
+  against state leaking between orders — stale pointers, trade_id not
+  advancing), and a latency regression guard (median must stay under
+  1ms — generous to avoid CI flakiness, but tight enough to catch a
+  gross regression like an accidentally introduced sleep() or an
+  O(n) scan reappearing in the hot path).
+
+### Results (this benchmark machine — single-core sandbox, two runs)
+| Run | Min | Mean | p50 | p99 | Max |
+|---|---|---|---|---|---|
+| 1 | 6.38µs | 8.26µs | 6.63µs | 24.52µs | 113.53µs |
+| 2 | 6.29µs | 7.09µs | 6.54µs | 15.54µs | 150.93µs |
+
+Both runs: correctness PASSED, p50 well under the spec's 50µs target,
+measured through the real ring-buffer pipeline (not an isolated
+in-memory shortcut).
+
+### Honesty notes
+- Single-process (writer and matcher sequential, same process) on
+  purpose --- isolates match latency itself from IPC/OS
+  context-switch noise between two separate processes, which is what
+  Day 8's audit already measures at throughput scale rather than
+  per-order latency. A two-process latency variant could be added
+  later if that distinction becomes important for the final report.
+- Same single-core sandbox caveat as every other benchmark in this
+  project (Day 4, Day 8): real measurements, not a production
+  hardware guarantee.
+- No hard-coded "pass at exactly 50µs" assertion in the automated
+  test --- the standalone report shows the real numbers against the
+  spec's target for a human to read; the pytest regression guard uses
+  a much looser 1ms threshold specifically to avoid false failures
+  from ordinary machine noise while still catching a real regression.
+
+### Tests
+`pytest -v` → 65/65 passing (61 previous + 4 new engine verification
+tests).
+
+## Day 10 — C-level optimization pass: price-level bucketing, found a real bottleneck and a real regression along the way
+
+### What was profiled first
+Before changing anything, checked whether Day 6's hot-path functions
+(`_insert_c`, `_match_c`) still had any Python-object interaction by
+inspecting Cython's generated annotation (`order_book.html`) directly
+rather than assuming. Result: zero Python-interaction lines in either
+function — Day 6's GC-safety work held up under direct inspection.
+
+So Day 10's optimization target had to be algorithmic, not
+GC-related. Measured insertion throughput at increasing book depth
+under an adversarial pattern (every order landing at the best price,
+forcing maximum `memmove` shift distance):
+
+| Book depth | Inserts/sec (Day 6 flat array) |
+|---|---|
+| 100 | 235,135 |
+| 1,000 | 197,800 |
+| 10,000 | 126,975 |
+| 50,000 | 14,642 |
+| 99,000 | 14,547 |
+
+A genuine ~16x degradation from shallow to deep books, confirming the
+O(n) array-shift cost of Day 6's one-flat-array-per-side design was a
+real bottleneck under load — not a synthetic concern.
+
+### The fix: price-level bucketing
+Rewrote `matching_engine/order_book.pyx` internal storage from one
+flat sorted array of individual orders per side to an array of price
+LEVELS, each holding its own small FIFO array of orders at that exact
+price — matching how real exchanges structure an order book. Binary
+search now happens over price levels (typically far fewer than
+individual orders in real markets) instead of over every order.
+Appending a new order to an EXISTING level's FIFO is O(1) amortized
+(tail append, no shift); creating a brand-new level or removing an
+emptied one still costs a shift, but bounded by the number of
+distinct prices, not the number of individual orders.
+
+New structures: `PriceLevel` (price, a FIFO array of `COrder`, count,
+capacity, and a `head` index that advances on removal instead of
+shifting the whole FIFO on every fill). Per-level FIFO arrays grow via
+`realloc()` if a single price level gets deeper than its starting
+capacity (16 orders) — still pure C allocation (`libc.stdlib`, not
+`PyMem_*`, since these calls happen inside `nogil` functions and
+`PyMem_*` requires the GIL — this was a real compile error caught
+immediately by the Cython compiler on the first build attempt).
+
+### A real capacity regression, found by re-running the benchmark after the rewrite
+The first working version set `MAX_PRICE_LEVELS = 10,000`, on the
+assumption that real order books have far fewer distinct prices than
+individual orders. Re-running the exact same adversarial benchmark
+used to justify this rewrite (unique price per order, up to 99,000
+orders) revealed the bug immediately: `len(book.sell_side)` returned
+10,000, not 99,000 — 89,000 orders had been silently dropped once the
+level array hit its (too-low) capacity limit. This would have been a
+real, silent regression versus Day 6's 100,000-order capacity
+guarantee. Fixed by raising `MAX_PRICE_LEVELS` to 100,000 to match
+Day 6's `MAX_BOOK_DEPTH` exactly, and documented directly in the
+constant's own comment so the reasoning doesn't get silently
+re-broken later.
+
+### Honest results — both scenarios reported, not just the favorable one
+After the capacity fix, re-ran both the realistic and adversarial
+benchmarks:
+
+| Scenario | Day 6 (flat array) | Day 10 (price-level bucketing) |
+|---|---|---|
+| Realistic: 50,000 orders, 50 price levels | ~97,637/sec | ~1,739,635–2,770,274/sec (~18-28x) |
+| Adversarial: unique price every order, depth 99,000 | ~14,547/sec | ~13,916–14,740/sec (no meaningful change) |
+
+The adversarial case shows essentially NO improvement — expected and
+now correctly understood, not silently mismeasured: when every order
+is at a genuinely unique price, each "level" holds exactly one order,
+so there's no FIFO-append benefit at all; shifting a level array
+costs about the same as shifting an order array. Bucketing helps
+enormously for realistic order flow (many orders sharing a bounded
+set of prices) and provides no benefit in a fully adversarial,
+non-repeating-price pattern. Both numbers are reported in
+`benchmarks/level_bucketing_benchmark.py`'s output rather than
+cherry-picking the favorable one.
+
+### Added
+- `benchmarks/level_bucketing_benchmark.py` — reports both the
+  realistic and adversarial scenarios, with the interpretation
+  printed alongside the numbers
+- `matching_engine/tests/test_price_level_bucketing.py` — 7 tests:
+  FIFO order preservation within a price level, level removal when
+  fully drained, partial fills staying at the front of their level's
+  FIFO, a level being correctly reused after being fully drained and
+  refilled, per-level FIFO growth beyond its initial capacity (the
+  `realloc()` path), the capacity regression described above
+  (regression test — inserts 99,000 unique prices and confirms none
+  are dropped), and a re-verification of Day 5's multi-level-walk
+  scenario against the new internal structure
+
+### Verified after the full rewrite
+- All 26 pre-existing `matching_engine/tests/` tests (Days 2, 5, 6, 9)
+  pass UNMODIFIED against the rewritten internals
+- All 65 previously-passing project tests (Days 1-9) still pass
+- `run_demo.py` re-run end to end: real trades still executing
+  correctly across two real processes
+- `run_dashboard_demo.py` re-run via pseudo-terminal: still renders
+  correctly, whale trades still detected
+- `audits/engine_verification.py` re-run: correctness still PASSED,
+  p50 latency actually improved slightly (5.36µs vs. Day 9's 6.5-6.6µs
+  — within normal run-to-run variance, not a claimed causal
+  improvement)
+- `audits/ipc_audit.py` re-run at full 1,000,000-order scale: still
+  PASSED, 0 missing, 0 duplicated, correct ordering
+
+### Tests
+`pytest -v` → 72/72 passing (65 previous + 7 new price-level
+bucketing tests).
+
+## Day 11 — GC-pause verification extended + a real zero-quantity bug found
+
+### GC-pause verification: closing a real coverage gap
+Day 6's GC-safety tests (`test_gc_safety.py`) seed one huge resting
+order and every subsequent test order fully matches against it
+(`remaining` is always 0) — meaning `_insert_c()` was never actually
+called by those tests. That was fine for Day 6's own design (a flat
+array, no dynamic allocation inside the hot path at all), but Day 10
+added `malloc()`/`realloc()` calls INSIDE `_insert_c()` (for creating
+new price levels and growing a level's FIFO) — and nothing had
+verified those specific calls stay GC-safe under load. This was a
+real, unverified gap, found by re-reading exactly what the existing
+tests did and didn't exercise, not by assumption.
+
+Verified directly (both manually first, then as permanent tests):
+- `malloc()` path (every order at a unique price, forcing a new
+  `PriceLevel` every time): 0 GC collections across a sustained run
+- `realloc()` path (every order at the SAME price, forcing the
+  per-level FIFO to keep growing past its initial 16-slot capacity):
+  0 GC collections across a sustained run
+
+Both confirm the expected reasoning (`libc.stdlib` malloc/realloc/free
+are raw C heap calls, entirely outside Python's object allocator and
+GC) directly rather than only trusting the theory.
+
+### Added — GC tests
+- `matching_engine/tests/test_new_price_level_creation_triggers_no_collections`
+- `matching_engine/tests/test_fifo_growth_within_one_price_level_triggers_no_collections`
+
+Both in `matching_engine/tests/test_gc_safety.py`, alongside the
+existing Day 6 tests.
+
+### A real bug found via edge-case exploration
+Per the plan's "expanded matching unit test coverage," explored edge
+cases beyond what existing tests already covered: zero quantity,
+negative quantity, and exact multi-level consumption. Found a genuine
+bug: `_insert_c()` had no validation on `order.quantity` — a
+zero-quantity order could be inserted onto the book and would sit
+there as a phantom price level. When a later order matched against
+it, it produced a fake trade with `quantity: 0` — a real "execution"
+with no economic meaning, silently mixed in with real trades.
+
+**Fix:** `_insert_c()` now rejects orders with `quantity <= 0` outright
+(returns `False`, same convention as the existing `MAX_BOOK_DEPTH`
+capacity guard). `_match_c()` didn't need a matching fix — its `while
+remaining > 0` loop condition already prevents a zero-quantity
+INCOMING order from producing any trade; the bug was specifically
+about a zero-quantity order resting on the book and being matched
+against later.
+
+### Added — regression tests
+`matching_engine/tests/test_price_level_bucketing.py`:
+- `test_zero_quantity_order_is_rejected_not_inserted`
+- `test_negative_quantity_order_is_rejected_not_inserted`
+- `test_zero_quantity_resting_order_cannot_produce_phantom_trade`
+- `test_exact_multi_level_consumption_leaves_book_empty` (a related
+  edge case checked at the same time — no off-by-one leaves a
+  phantom empty level or incorrect resting remainder when an
+  incoming order's quantity exactly matches the sum of several
+  resting levels)
+
+### Verified after the fix
+- All 72 previously-passing tests (Days 1-10) still pass
+- `run_demo.py` re-run end to end: real trades still executing
+  correctly
+- `audits/engine_verification.py` re-run: correctness PASSED,
+  p50 latency 4.08µs (within normal run-to-run variance of Day 10's
+  5.36µs — not a claimed causal change from this fix)
+- `audits/ipc_audit.py` re-run at full 1,000,000-order scale: still
+  PASSED, 0 missing, 0 duplicated, correct ordering
+
+### Tests
+`pytest -v` → 78/78 passing (72 previous + 2 new GC coverage tests +
+4 new zero-quantity/edge-case regression tests).
