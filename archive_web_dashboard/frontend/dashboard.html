@@ -1,0 +1,595 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+    <title>ChronosMatch Dashboard</title>
+
+    <link rel="stylesheet" href="css/common.css">
+    <link rel="stylesheet" href="css/dashboard.css">
+
+    <link href="https://fonts.googleapis.com/css2?family=Poppins:wght@300;400;500;600;700&display=swap"
+        rel="stylesheet">
+
+</head>
+
+<body>
+
+    <!-- ========================= -->
+    <!-- Loading Screen -->
+    <!-- ========================= -->
+
+    <div id="loader">
+
+        <div class="loader-content">
+
+            <div class="spinner"></div>
+
+            <h1>ChronosMatch</h1>
+
+            <p>Loading Trading Engine...</p>
+
+        </div>
+
+    </div>
+
+    <div class="wrapper">
+
+        <!-- ========================= -->
+        <!-- Sidebar -->
+        <!-- ========================= -->
+
+        <div class="sidebar">
+
+            <h2>ChronosMatch</h2>
+
+            <ul>
+
+                <li><a href="#dashboard">🏠 Dashboard</a></li>
+
+               <li><a href="orderbook.html">📖 Order Book</a></li>
+
+                <li><a href="#trades">💹 Trades</a></li>
+
+                <li><a href="#analytics">📊 Analytics</a></li>
+
+                <li><a href="#activity">📜 Logs</a></li>
+
+                <li><a href="#settings">⚙ Settings</a></li>
+
+            </ul>
+
+        </div>
+
+        <!-- ========================= -->
+        <!-- Main Content -->
+        <!-- ========================= -->
+
+        <div class="main-content">
+
+            <!-- ========================= -->
+            <!-- Navbar -->
+            <!-- ========================= -->
+
+            <div class="navbar">
+
+                <div class="controls">
+
+                    <button id="startBtn">▶ Start</button>
+
+                    <button id="pauseBtn">⏸ Pause</button>
+
+                    <button id="resumeBtn">⏯ Resume</button>
+
+                    <button id="stopBtn">⏹ Stop</button>
+
+                </div>
+
+                <h2>Trading Dashboard</h2>
+
+                <div class="right-section">
+
+                    <!-- Theme Button -->
+
+                    <button id="themeToggle">
+                        🌙
+                    </button>
+
+                    <!-- Notification -->
+
+                    <div class="notification">
+
+                        <button id="notificationBtn">
+
+                            🔔
+
+                            <span class="badge">5</span>
+
+                        </button>
+
+                        <div class="notification-panel" id="notificationPanel">
+
+                            <h3>Notifications</h3>
+
+                            <ul>
+
+                                <li>✅ BTC Order Completed</li>
+
+                                <li>📈 ETH Price Increased</li>
+
+                                <li>⚠ High Market Volatility</li>
+
+                                <li>💰 Portfolio Updated</li>
+
+                                <li>🔔 New Trade Executed</li>
+
+                            </ul>
+
+                        </div>
+
+                    </div>
+
+                    <!-- Search -->
+
+                    <input
+                        type="text"
+                        id="searchBox"
+                        placeholder="Search...">
+
+                    <!-- Clock -->
+
+                    <div id="clock">
+
+                        Loading...
+
+                    </div>
+
+                    <!-- Admin -->
+
+                    <div class="admin-dropdown">
+
+                        <button id="adminBtn">
+
+                            👤 Admin ▼
+
+                        </button>
+
+                        <div class="dropdown-content" id="dropdownMenu">
+
+                            <a href="#">👤 My Profile</a>
+
+                            <a href="#">⚙ Settings</a>
+
+                            <a href="#">🌙 Dark Mode</a>
+
+                            <a href="#">🚪 Logout</a>
+
+                        </div>
+
+                    </div>
+
+                </div>
+
+            </div>
+
+            <!-- ========================= -->
+            <!-- Live Stock Ticker -->
+            <!-- ========================= -->
+
+            <div class="ticker">
+
+                <marquee id="stockTicker" behavior="scroll" direction="left">
+
+                    📈 BTC : $65,200 ▲0.5%
+
+                    &nbsp;&nbsp;&nbsp;&nbsp;
+
+                    📉 ETH : $3,420 ▼0.3%
+
+                    &nbsp;&nbsp;&nbsp;&nbsp;
+
+                    📈 AAPL : $215 ▲1.2%
+
+                    &nbsp;&nbsp;&nbsp;&nbsp;
+
+                    📉 TSLA : $250 ▼0.8%
+
+                    &nbsp;&nbsp;&nbsp;&nbsp;
+
+                    📈 NVDA : $178 ▲2.1%
+
+                </marquee>
+
+            </div>
+
+            <!-- ========================= -->
+            <!-- Dashboard Cards -->
+            <!-- ========================= -->
+
+            <div class="cards" id="dashboard">
+                <!-- Card 1 -->
+
+<div class="card">
+
+    <h3>Orders Processed</h3>
+
+    <h1>5200</h1>
+
+</div>
+
+<!-- Card 2 -->
+
+<div class="card">
+
+    <h3>Trades Matched</h3>
+
+    <h1>1800</h1>
+
+</div>
+
+<!-- Card 3 -->
+
+<div class="card">
+
+    <h3>Average Latency</h3>
+
+    <h1>45 ms</h1>
+
+</div>
+
+<!-- Card 4 -->
+
+<div class="card">
+
+    <h3>Buffer Usage</h3>
+
+    <h1>32%</h1>
+
+</div>
+
+</div>
+
+<!-- ========================= -->
+<!-- Performance Chart -->
+<!-- ========================= -->
+
+<div class="chart" id="analytics">
+
+    <h2>📈 Live Performance Chart</h2>
+
+    <canvas id="chart"></canvas>
+
+</div>
+
+<!-- ========================= -->
+<!-- Live Order Book -->
+<!-- ========================= -->
+
+<div class="order-book" id="orderbook">
+
+    <h2>📖 Live Order Book</h2>
+
+    <div class="order-container">
+
+        <!-- Buy Orders -->
+
+        <div class="buy-orders">
+
+            <h3>🟢 Buy Orders</h3>
+
+            <table id="buyTable">
+
+                <tr>
+
+                    <th>Price</th>
+
+                    <th>Qty</th>
+
+                </tr>
+
+                <tr>
+
+                    <td>$65,200</td>
+
+                    <td>5</td>
+
+                </tr>
+
+                <tr>
+
+                    <td>$65,180</td>
+
+                    <td>8</td>
+
+                </tr>
+
+                <tr>
+
+                    <td>$65,150</td>
+
+                    <td>12</td>
+
+                </tr>
+
+            </table>
+
+        </div>
+
+        <!-- Sell Orders -->
+
+        <div class="sell-orders">
+
+            <h3>🔴 Sell Orders</h3>
+
+            <table id="sellTable">
+
+                <tr>
+
+                    <th>Price</th>
+
+                    <th>Qty</th>
+
+                </tr>
+
+                <tr>
+
+                    <td>$65,250</td>
+
+                    <td>3</td>
+
+                </tr>
+
+                <tr>
+
+                    <td>$65,280</td>
+
+                    <td>7</td>
+
+                </tr>
+
+                <tr>
+
+                    <td>$65,300</td>
+
+                    <td>9</td>
+
+                </tr>
+
+            </table>
+
+        </div>
+
+    </div>
+
+</div>
+
+<!-- ========================= -->
+<!-- Bottom Section -->
+<!-- ========================= -->
+
+<div class="bottom">
+
+    <!-- Recent Trades -->
+
+    <div class="table" id="trades">
+
+        <h2>📋 Recent Trades</h2>
+
+        <table id="tradeTable">
+
+            <tr>
+
+                <th>Time</th>
+
+                <th>Stock</th>
+
+                <th>Price</th>
+
+                <th>Quantity</th>
+
+            </tr>
+
+            <tr>
+
+                <td>09:15</td>
+
+                <td>BTC</td>
+
+                <td>$65,200</td>
+
+                <td>2</td>
+
+            </tr>
+
+            <tr>
+
+                <td>09:30</td>
+
+                <td>ETH</td>
+
+                <td>$3,420</td>
+
+                <td>5</td>
+
+            </tr>
+
+            <tr>
+
+                <td>10:00</td>
+
+                <td>AAPL</td>
+
+                <td>$215</td>
+
+                <td>10</td>
+
+            </tr>
+
+            <tr>
+
+                <td>10:20</td>
+
+                <td>TSLA</td>
+
+                <td>$250</td>
+
+                <td>8</td>
+
+            </tr>
+
+        </table>
+
+    </div>
+
+    <!-- Right Side -->
+
+    <div>
+
+        <!-- Market News -->
+
+        <div class="news">
+
+            <h2>📰 Market News</h2>
+
+            <ul>
+
+                <li>📈 Bitcoin rises 3%</li>
+
+                <li>📉 Tesla shares fall 1.5%</li>
+
+                <li>💰 Gold reaches monthly high</li>
+
+                <li>🏦 Federal Reserve keeps interest rates unchanged</li>
+
+                <li>🚀 NVIDIA announces new AI chips</li>
+
+            </ul>
+
+        </div>
+
+        <!-- Activity Log -->
+
+        <div class="activity" id="activity">
+
+            <h2>📋 Activity Log</h2>
+
+            <ul id="activityLog">
+
+                <li>System Started...</li>
+
+            </ul>
+
+        </div>
+
+    </div>
+
+</div>
+<!-- ========================= -->
+<!-- Settings Section -->
+<!-- ========================= -->
+
+<!-- ========================= -->
+<!-- Settings -->
+<!-- ========================= -->
+
+<div class="settings" id="settings">
+
+    <h2>⚙ Settings</h2>
+
+    <p><strong>Theme:</strong> Dark Mode</p>
+
+    <p><strong>Notifications:</strong> Enabled</p>
+
+    <p><strong>Auto Refresh:</strong> ON</p>
+
+    <p><strong>Version:</strong> 1.0.0</p>
+
+</div>
+
+<!-- ========================= -->
+<!-- Footer -->
+<!-- ========================= -->
+
+<footer class="footer">
+
+    <p>© 2026 ChronosMatch | Real-Time Trading Dashboard</p>
+
+</footer>
+
+<!-- End Main Content -->
+</div>
+
+<!-- End Wrapper -->
+</div>
+
+<!-- JavaScript Files -->
+<script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+<script src="js/charts.js"></script>
+<script src="js/dashboard.js"></script>
+<script src="js/websocket.js"></script>
+
+</body>
+</html>
+<!-- End Main Content -->
+
+</div>
+<!-- End Wrapper -->
+
+<!-- ========================= -->
+<!-- JavaScript Files -->
+<!-- ========================= -->
+
+<script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+
+<script src="js/charts.js"></script>
+
+<script src="js/dashboard.js"></script>
+
+<script src="js/websocket.js"></script>
+<script>
+
+    window.addEventListener("load", function () {
+
+        setTimeout(function () {
+
+            const loadingScreen =
+                document.getElementById("loadingScreen");
+
+            if (loadingScreen) {
+
+                loadingScreen.classList.add("hide");
+
+            }
+
+        }, 1000);
+
+    });
+
+</script>
+
+</body>
+<script>
+
+    window.addEventListener("load", function () {
+
+        setTimeout(function () {
+
+            const loadingScreen =
+                document.getElementById("loadingScreen");
+
+            if (loadingScreen) {
+
+                loadingScreen.classList.add("hide");
+
+            }
+
+        }, 1000);
+
+    });
+
+</script>
+
+</html>
