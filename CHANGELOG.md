@@ -850,3 +850,164 @@ against later.
 ### Tests
 `pytest -v` → 78/78 passing (72 previous + 2 new GC coverage tests +
 4 new zero-quantity/edge-case regression tests).
+
+## Day 12 — nanosecond entry/exit latency instrumentation on every trade
+
+### What changed
+Per spec: "Embed time.perf_counter_ns() timestamps to measure the
+exact nanosecond a trade enters and exits the engine." Every trade
+produced by the matching engine now carries three new fields:
+- `entry_timestamp` — the INCOMING (triggering) order's own
+  timestamp, not the resting order's (the resting order may have
+  been sitting on the book for an arbitrary, unrelated amount of
+  time — what matters is how long the system took to process the
+  order that just arrived)
+- `exit_timestamp` — the nanosecond this specific trade was recorded,
+  captured from INSIDE the `nogil` matching loop itself
+- `latency_ns` — precomputed `exit_timestamp - entry_timestamp`,
+  available even through the pure-C entry point with no Python
+  arithmetic involved
+
+### The key technical detail
+Timestamp capture uses `cpython.time.perf_counter_ns()` (Cython's
+C-level binding), not Python's `time.perf_counter_ns()` directly —
+the latter requires the GIL, and this measurement happens inside
+`_record_trade_c()`, called from the `nogil` `_match_c()` matching
+loop. `cpython.time`'s version reads the same underlying OS clock
+without needing the GIL, preserving Day 6/10's GC-safety guarantees.
+Verified directly (not just assumed) by re-inspecting Cython's own
+annotation output: `_record_trade_c` shows zero Python-interaction
+lines even with the new timestamp capture added — same evidence-based
+check used for Day 10's optimization work.
+
+### Cross-verification against Day 9's external measurement
+Ran both an external wall-clock measurement (write_order → match_order,
+same technique as `audits/engine_verification.py`) and the new
+internal `latency_ns` field side by side on the same 1,000 trades.
+Result: internal (engine-only) p50 was 5.30µs vs. external p50 of
+5.66µs — the internal number is correctly SMALLER, exactly as
+expected, since it excludes the ring buffer read/write and
+dict-conversion overhead that surrounds the engine call. This
+cross-check gives real confidence the new instrumentation measures
+what it claims to, rather than just trusting the arithmetic.
+
+### Added
+- `matching_engine/tests/test_latency_instrumentation.py` — 8 tests:
+  trade dict includes all three new fields, `entry_timestamp` reflects
+  the incoming order (not the resting one), `exit_timestamp` is
+  strictly after `entry_timestamp`, `latency_ns` exactly equals their
+  difference, latency is positive and sane-bounded, multiple trades
+  produced by one multi-level match each get their own
+  `exit_timestamp` while sharing the same `entry_timestamp`, the
+  pure-C entry point (`run_c_only_matching_cycle`) also produces
+  correctly timestamped trades (confirms the instrumentation lives in
+  the actual hot path, not bolted on only at the Python-facing edge),
+  and the `trades` property (full history view) also carries the new
+  fields.
+
+### Updated
+- `run_demo.py`: each TRADE line now shows real per-trade latency in
+  microseconds. Documented an important honesty point directly in the
+  script: this demo's matcher process polls the ring buffer with a
+  20ms sleep between empty reads, so an order can sit in the buffer
+  for up to ~20ms before the matcher even looks at it — that polling
+  delay dominates the numbers shown in this demo's output, and is a
+  property of the demo's simple polling loop, not the engine. The
+  engine's real matching latency (single-digit microseconds) is what
+  `audits/engine_verification.py` and this day's unit tests measure
+  in isolation, specifically to keep the two separate.
+- `audits/engine_verification.py`: updated its closing message to
+  point at the new internal instrumentation instead of referencing it
+  as still-pending work.
+
+### Verified after the change
+- All 78 previously-passing tests (Days 1-11) still pass
+- GC-safety re-confirmed explicitly (all 7 `test_gc_safety.py` tests
+  pass; `_record_trade_c` re-checked via Cython annotation, zero
+  Python-interaction lines)
+- `run_demo.py` re-run end to end: real trades with real (if
+  polling-dominated, as documented) latency numbers displayed
+- `run_dashboard_demo.py` re-run via pseudo-terminal: still works,
+  unaffected by the extra trade dict fields
+- `audits/engine_verification.py` re-run: correctness PASSED, p50
+  5.49µs
+- `audits/ipc_audit.py` re-run at full 1,000,000-order scale: still
+  PASSED, 0 missing, 0 duplicated, correct ordering
+
+### Tests
+`pytest -v` → 86/86 passing (78 previous + 8 new latency
+instrumentation tests).
+
+## Day 13 — latency metrics pipeline: live p50/p99/p999
+
+### What this adds beyond Day 12
+Day 12 gave every individual trade its own `entry_timestamp`,
+`exit_timestamp`, and `latency_ns` — but nothing aggregated that data
+into something a dashboard or monitor could actually query cheaply.
+Pulling the full trade history (up to `MAX_TRADES` = 1,000,000
+entries) and sorting it on every query would get slower as trades
+accumulate, which is the wrong shape for something a live view might
+poll repeatedly.
+
+### Design
+- A fixed-size circular buffer (`LATENCY_RING_SIZE` = 10,000) of the
+  most recent trade latencies, written with O(1) cost per trade
+  directly inside `_record_trade_c()` — no allocation, no sorting, on
+  every single trade.
+- Separately, exact lifetime running stats (`count`, `sum`, `min`,
+  `max`) updated with O(1) cost per trade — these never need the ring
+  buffer or any sorting, and stay exact no matter how many trades
+  have happened in total (verified: lifetime `count` is correct even
+  well past the ring's 10,000-entry capacity).
+- `get_latency_stats()`: the only place any sorting happens, and only
+  on demand — sorts a COPY of the bounded ring (via
+  `libc.stdlib.qsort` with a plain C comparator function, not a
+  Python-level sort), so querying stats has a small, predictable cost
+  regardless of total trade volume, and never mutates the live ring
+  or disturbs the matching engine's own state (verified directly:
+  three consecutive stats queries against unchanged book state return
+  identical results).
+
+### Deliberate design choice: windowed percentiles, exact lifetime stats
+p50/p99/p999 reflect only the most recent ~10,000 trades, not the
+full lifetime history. This is intentional: "how is the system
+performing right now" is the right question for a live view, not a
+percentile blended across everything since startup (including any
+cold-start warmup). `count`/`min`/`mean`/`max` remain exact lifetime
+values since those don't require sorting and cost nothing extra to
+keep precise.
+
+### Added
+- `matching_engine/tests/test_latency_metrics.py` — 8 tests: empty
+  state returns zeroed stats (not an error), correct field shape,
+  percentile ordering (min <= p50 <= p99 <= p999 <= max, which must
+  always hold by definition), exact lifetime count both below and
+  past the ring's capacity, mean cross-checked against the `trades`
+  property's own values for an exactly-countable batch, repeated
+  queries don't disturb book state, and single-trade edge case (all
+  percentiles collapse to that one value).
+
+### Updated
+- `run_demo.py`: the matcher process now prints a periodic STATS line
+  (n/p50/p99/p999/max) every 10 trades, alongside each individual
+  trade's own latency line from Day 12 — both pieces visible together
+  in the live demo output.
+
+### Verified after the change
+- All 86 previously-passing tests (Days 1-12) still pass
+- GC-safety tests re-run (7/7 pass) — these exercise
+  `run_c_only_matching_cycle` in a tight loop, which now also calls
+  the new `_record_latency_sample()` on every trade, so this is real
+  (if implicit) load-bearing verification that the ring-buffer
+  recording stays GC-safe, not just an assumption
+- `run_demo.py` re-run end to end: STATS lines appear correctly,
+  consistent with individual TRADE latency lines
+- `audits/engine_verification.py` re-run: correctness PASSED, p50
+  5.58µs
+- `audits/ipc_audit.py` re-run at full 1,000,000-order scale: still
+  PASSED, 0 missing, 0 duplicated, correct ordering
+- `run_dashboard_demo.py` re-run via pseudo-terminal: no errors
+
+### Tests
+`pytest -v` → 94/94 passing (86 previous + 8 new latency metrics
+tests).

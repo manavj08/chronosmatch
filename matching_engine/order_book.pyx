@@ -36,12 +36,37 @@ of the number of individual orders.
 order_id, quantity, timestamp -> C long long (int64_t)
 price -> C double
 side -> C char ('B' or 'S')
+
+Day 12: NANOSECOND LATENCY INSTRUMENTATION. Per spec: "Embed
+time.perf_counter_ns() timestamps to measure the exact nanosecond a
+trade enters and exits the engine." Every trade now carries
+entry_timestamp (the triggering incoming order's own timestamp ---
+i.e. when that order entered the system, set by whoever created it:
+simulator/order_generator.py in normal operation), exit_timestamp
+(the nanosecond this trade was recorded, measured from INSIDE the
+nogil matching loop), and latency_ns (the difference, precomputed
+here rather than left to the caller).
+
+Uses cpython.time.perf_counter_ns() rather than Python's
+time.perf_counter_ns() directly, because the latter requires the
+GIL and this measurement happens inside a nogil function
+(_record_trade_c, called from the nogil _match_c matching loop).
+cpython.time's version reads the same underlying OS clock and
+matches Python's perf_counter_ns() behavior without needing the GIL.
+Day 9's audits/engine_verification.py already measured latency this
+way from OUTSIDE the engine (wall-clock around write_order/match_order
+calls); Day 12 moves the actual timestamp capture for exit_timestamp
+INSIDE the engine itself, which is more precise (excludes Python
+function-call and dict-conversion overhead from the exit timestamp)
+and makes the data permanently available on every trade, not just
+during a special benchmark run.
 """
 
 from libc.stdint cimport int64_t
 from libc.string cimport memmove
-from libc.stdlib cimport malloc, realloc, free
+from libc.stdlib cimport malloc, realloc, free, qsort
 from cpython.mem cimport PyMem_Malloc, PyMem_Free
+from cpython.time cimport perf_counter_ns
 
 DEF MAX_PRICE_LEVELS = 100000    # distinct price points per side. Set
                                   # to match Day 6's MAX_BOOK_DEPTH
@@ -65,6 +90,34 @@ DEF INITIAL_LEVEL_CAPACITY = 16  # starting FIFO capacity per price
                                   # single price level gets deeper than
                                   # this (still pure C, no Python object)
 DEF MAX_TRADES = 1000000
+DEF LATENCY_RING_SIZE = 10000  # fixed-size circular buffer of recent
+                                 # per-trade latencies, used for live
+                                 # percentile queries (Day 13). Kept
+                                 # separate and much smaller than
+                                 # MAX_TRADES on purpose: a percentile
+                                 # query sorts this buffer, and sorting
+                                 # a bounded 10,000-element buffer is
+                                 # cheap and has predictable cost no
+                                 # matter how many trades have
+                                 # happened in total, whereas sorting
+                                 # the full trade history (which could
+                                 # be up to a million entries) on
+                                 # every dashboard refresh would not be.
+
+
+cdef int _compare_int64(const void* a, const void* b) noexcept nogil:
+    """Comparator for libc.stdlib.qsort, used by get_latency_stats()
+    (Day 13) to sort the latency ring buffer for percentile
+    computation. Must be a plain C function (not a bound method) ---
+    qsort takes a raw function pointer."""
+    cdef int64_t val_a = (<int64_t*>a)[0]
+    cdef int64_t val_b = (<int64_t*>b)[0]
+    if val_a < val_b:
+        return -1
+    elif val_a > val_b:
+        return 1
+    else:
+        return 0
 
 
 cdef struct COrder:
@@ -92,6 +145,21 @@ cdef struct CTrade:
     int64_t sell_order_id
     double price
     int64_t quantity
+    int64_t entry_timestamp    # the INCOMING order's own timestamp
+                                 # (when it entered the system, set by
+                                 # the caller --- simulator/order_generator.py
+                                 # or wherever the order originated)
+    int64_t exit_timestamp      # nanosecond time this trade was
+                                 # recorded, measured with
+                                 # cpython.time.perf_counter_ns() from
+                                 # INSIDE the nogil matching loop ---
+                                 # no GIL reacquisition needed
+    int64_t latency_ns          # exit_timestamp - entry_timestamp;
+                                 # precomputed here rather than left
+                                 # for the Python-facing caller to
+                                 # subtract, so it's available even
+                                 # through the C-only path with no
+                                 # Python arithmetic involved
 
 
 cdef class OrderBookCython:
@@ -112,6 +180,20 @@ cdef class OrderBookCython:
     cdef int64_t _trade_count
     cdef int64_t _trade_id_counter
 
+    # Day 13: circular buffer of the most recent LATENCY_RING_SIZE
+    # trade latencies (nanoseconds), plus lifetime running stats that
+    # don't require the buffer at all (min/max/sum/count --- these
+    # are O(1) to update per trade and never need sorting).
+    cdef int64_t* _latency_ring
+    cdef int64_t _latency_ring_next    # next write position (wraps around)
+    cdef int64_t _latency_ring_filled  # how many slots are populated so far
+                                         # (< LATENCY_RING_SIZE until the
+                                         # ring wraps for the first time)
+    cdef int64_t _latency_count_lifetime
+    cdef int64_t _latency_sum_lifetime
+    cdef int64_t _latency_min_lifetime
+    cdef int64_t _latency_max_lifetime
+
     def __cinit__(self):
         self._buy_levels = <PriceLevel*>PyMem_Malloc(MAX_PRICE_LEVELS * sizeof(PriceLevel))
         self._sell_levels = <PriceLevel*>PyMem_Malloc(MAX_PRICE_LEVELS * sizeof(PriceLevel))
@@ -120,6 +202,14 @@ cdef class OrderBookCython:
         self._sell_level_count = 0
         self._trade_count = 0
         self._trade_id_counter = 1
+
+        self._latency_ring = <int64_t*>PyMem_Malloc(LATENCY_RING_SIZE * sizeof(int64_t))
+        self._latency_ring_next = 0
+        self._latency_ring_filled = 0
+        self._latency_count_lifetime = 0
+        self._latency_sum_lifetime = 0
+        self._latency_min_lifetime = 0
+        self._latency_max_lifetime = 0
 
     def __dealloc__(self):
         cdef int64_t i
@@ -135,6 +225,8 @@ cdef class OrderBookCython:
             PyMem_Free(self._sell_levels)
         if self._trades_c is not NULL:
             PyMem_Free(self._trades_c)
+        if self._latency_ring is not NULL:
+            PyMem_Free(self._latency_ring)
 
     # ------------------------------------------------------------------
     # HOT PATH --- pure C, no Python objects. Day 10: operates on price
@@ -273,18 +365,62 @@ cdef class OrderBookCython:
         level_count_ptr[0] -= 1
 
     cdef void _record_trade_c(self, int64_t buy_order_id, int64_t sell_order_id,
-                                double price, int64_t qty) noexcept nogil:
+                                double price, int64_t qty,
+                                int64_t entry_timestamp) noexcept nogil:
+        """
+        Day 12: records entry/exit timestamps and computed latency
+        alongside the trade. entry_timestamp is the INCOMING order's
+        own timestamp (the order that triggered this match by
+        crossing the book) --- NOT the resting order's timestamp,
+        since the resting order may have been sitting on the book for
+        an arbitrary amount of time before this match happened; what
+        the spec's latency instrumentation cares about is how long it
+        took the system to process the order that just arrived.
+
+        exit_timestamp is measured HERE, inside the nogil matching
+        loop, using cpython.time.perf_counter_ns() --- a nogil-safe
+        C-level nanosecond clock (not the same object as Python's
+        time.perf_counter_ns(), but reads the same underlying OS
+        clock and matches its behavior; see the module docstring for
+        why this specific function was chosen over alternatives).
+        """
         cdef CTrade* t
+        cdef int64_t now
         if self._trade_count >= MAX_TRADES:
             return
+        now = perf_counter_ns()
         t = &self._trades_c[self._trade_count]
         t.trade_id = self._trade_id_counter
         t.buy_order_id = buy_order_id
         t.sell_order_id = sell_order_id
         t.price = price
         t.quantity = qty
+        t.entry_timestamp = entry_timestamp
+        t.exit_timestamp = now
+        t.latency_ns = now - entry_timestamp
         self._trade_id_counter += 1
         self._trade_count += 1
+        self._record_latency_sample(t.latency_ns)
+
+    cdef void _record_latency_sample(self, int64_t latency_ns) noexcept nogil:
+        """Day 13: O(1) update of the circular latency ring and the
+        lifetime running stats (min/max/sum/count). No sorting, no
+        allocation --- this runs on every single trade, so it has to
+        stay cheap regardless of how many trades have happened so
+        far. Percentile computation (which DOES require sorting) only
+        happens on demand, in get_latency_stats(), over the bounded
+        ring buffer --- never over the full trade history."""
+        self._latency_ring[self._latency_ring_next] = latency_ns
+        self._latency_ring_next = (self._latency_ring_next + 1) % LATENCY_RING_SIZE
+        if self._latency_ring_filled < LATENCY_RING_SIZE:
+            self._latency_ring_filled += 1
+
+        self._latency_count_lifetime += 1
+        self._latency_sum_lifetime += latency_ns
+        if self._latency_count_lifetime == 1 or latency_ns < self._latency_min_lifetime:
+            self._latency_min_lifetime = latency_ns
+        if self._latency_count_lifetime == 1 or latency_ns > self._latency_max_lifetime:
+            self._latency_max_lifetime = latency_ns
 
     cdef int64_t _match_c(self, COrder incoming) noexcept nogil:
         """
@@ -327,9 +463,11 @@ cdef class OrderBookCython:
             fill_qty = remaining if remaining < front_order.quantity else front_order.quantity
 
             if is_buy_side:
-                self._record_trade_c(incoming.order_id, front_order.order_id, lvl.price, fill_qty)
+                self._record_trade_c(incoming.order_id, front_order.order_id, lvl.price,
+                                      fill_qty, incoming.timestamp)
             else:
-                self._record_trade_c(front_order.order_id, incoming.order_id, lvl.price, fill_qty)
+                self._record_trade_c(front_order.order_id, incoming.order_id, lvl.price,
+                                      fill_qty, incoming.timestamp)
 
             remaining -= fill_qty
             front_order.quantity -= fill_qty
@@ -388,6 +526,9 @@ cdef class OrderBookCython:
                 "sell_order_id": self._trades_c[i].sell_order_id,
                 "price": self._trades_c[i].price,
                 "quantity": self._trades_c[i].quantity,
+                "entry_timestamp": self._trades_c[i].entry_timestamp,
+                "exit_timestamp": self._trades_c[i].exit_timestamp,
+                "latency_ns": self._trades_c[i].latency_ns,
             })
 
         if remaining > 0:
@@ -434,6 +575,9 @@ cdef class OrderBookCython:
                 "sell_order_id": self._trades_c[i].sell_order_id,
                 "price": self._trades_c[i].price,
                 "quantity": self._trades_c[i].quantity,
+                "entry_timestamp": self._trades_c[i].entry_timestamp,
+                "exit_timestamp": self._trades_c[i].exit_timestamp,
+                "latency_ns": self._trades_c[i].latency_ns,
             }
             for i in range(self._trade_count)
         ]
@@ -470,7 +614,71 @@ cdef class OrderBookCython:
             "sell_order_id": t.sell_order_id,
             "price": t.price,
             "quantity": t.quantity,
+            "entry_timestamp": t.entry_timestamp,
+            "exit_timestamp": t.exit_timestamp,
+            "latency_ns": t.latency_ns,
         }
+
+    cpdef dict get_latency_stats(self):
+        """
+        Day 13: THE LATENCY METRICS PIPELINE. Returns live
+        min/mean/max (lifetime, O(1) running stats, always exact) and
+        p50/p99/p999 (computed from the bounded circular ring of the
+        most recent LATENCY_RING_SIZE trades --- so these percentiles
+        reflect RECENT behavior, not necessarily the full lifetime
+        history, which is the right tradeoff for a live dashboard:
+        "how is the system performing right now" matters more than a
+        percentile blended across everything that's ever happened,
+        including a cold-start warmup period from hours ago).
+
+        Percentile computation sorts a COPY of the ring buffer (via
+        libc.stdlib.qsort, nogil-safe, no Python object involved) ---
+        the live ring itself is never mutated by a stats query, so
+        querying stats has no effect on the matching loop's own state.
+        """
+        cdef int64_t n = self._latency_ring_filled
+        if n == 0 or self._latency_count_lifetime == 0:
+            return {
+                "count": 0, "min_ns": 0, "mean_ns": 0, "max_ns": 0,
+                "p50_ns": 0, "p99_ns": 0, "p999_ns": 0,
+            }
+
+        cdef int64_t* sorted_copy = <int64_t*>malloc(n * sizeof(int64_t))
+        cdef int64_t i
+        if sorted_copy == NULL:
+            # Allocation failed --- fall back to lifetime stats only,
+            # no percentiles, rather than crashing a stats query.
+            return {
+                "count": self._latency_count_lifetime,
+                "min_ns": self._latency_min_lifetime,
+                "mean_ns": self._latency_sum_lifetime // self._latency_count_lifetime,
+                "max_ns": self._latency_max_lifetime,
+                "p50_ns": 0, "p99_ns": 0, "p999_ns": 0,
+            }
+
+        for i in range(n):
+            sorted_copy[i] = self._latency_ring[i]
+        qsort(sorted_copy, n, sizeof(int64_t), _compare_int64)
+
+        cdef int64_t p50_idx = n // 2
+        cdef int64_t p99_idx = <int64_t>(n * 0.99)
+        cdef int64_t p999_idx = <int64_t>(n * 0.999)
+        if p99_idx >= n:
+            p99_idx = n - 1
+        if p999_idx >= n:
+            p999_idx = n - 1
+
+        cdef dict result = {
+            "count": self._latency_count_lifetime,
+            "min_ns": self._latency_min_lifetime,
+            "mean_ns": self._latency_sum_lifetime // self._latency_count_lifetime,
+            "max_ns": self._latency_max_lifetime,
+            "p50_ns": sorted_copy[p50_idx],
+            "p99_ns": sorted_copy[p99_idx],
+            "p999_ns": sorted_copy[p999_idx],
+        }
+        free(sorted_copy)
+        return result
 
     cpdef int64_t run_c_only_matching_cycle(self, int64_t order_id, int side,
                                               double price, int64_t quantity,

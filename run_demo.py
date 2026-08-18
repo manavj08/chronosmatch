@@ -24,12 +24,31 @@ What this actually demonstrates (nothing here is faked or simulated):
 
 What this demo does NOT yet show (honestly, not built yet --- see
 TASKS.md for the day it's scheduled):
-   - nanosecond latency measurement (Day 12-13)
-   - GC-pause verification during matching is done (Day 6) but not
+   - GC-pause verification during matching is done (Day 6/11) but not
      surfaced in this demo's output
    - the demo uses a small, readable order rate on purpose (Day 4's
      asyncio firehose can sustain ~100k/sec, see benchmarks/), so the
      output here stays watchable rather than scrolling by instantly
+
+Each TRADE line now shows real per-trade latency in microseconds
+(Day 12), measured inside the engine itself from the triggering
+order's own timestamp to the moment that trade was recorded.
+
+IMPORTANT --- what this demo's latency numbers actually represent:
+orders here are timestamped at GENERATION time
+(simulator/order_generator.py). The matcher process in this demo
+polls the ring buffer with a 20ms sleep between checks when it finds
+nothing to read (see matcher_process() below) --- so an order can sit
+in the buffer for up to ~20ms before the matcher even looks at it,
+before any engine processing happens at all. That polling delay
+dominates the latency numbers shown here; it is a property of this
+DEMO's simple polling loop, not of the matching engine itself. Day 9's
+audits/engine_verification.py and Day 12's own unit tests measure the
+engine's pure matching latency in isolation (single-digit
+microseconds, no polling involved) specifically to separate those two
+things. A production consumer would use blocking/event-driven reads
+instead of sleep-based polling to eliminate this gap --- that's a
+demo simplification, not a claim about the engine's real capability.
 
 For the live curses dashboard (Day 7) instead of plain stdout, see
 run_dashboard_demo.py.
@@ -75,12 +94,16 @@ def matcher_process():
     """Real, separate OS process. Reads the SAME shared memory region
     and feeds every order into the compiled Cython engine's real
     price-time priority matching (Day 5) --- trades execute when
-    prices cross, not just sorted insertion."""
+    prices cross, not just sorted insertion. Day 13: also prints a
+    periodic latency-stats summary (p50/p99/p999 from the live
+    metrics pipeline), alongside each individual trade's own latency
+    (Day 12), so both pieces are visible together."""
     from order_book import OrderBookCython  # the compiled .so
 
     rb = RingBuffer(capacity=RING_BUFFER_CAPACITY, create=False)
     book = OrderBookCython()
     end_time = time.time() + DEMO_DURATION_SECONDS + 2  # drain a little after generator stops
+    trades_since_last_summary = 0
 
     while time.time() < end_time:
         order = rb.read_order()
@@ -101,7 +124,19 @@ def matcher_process():
             print(f"[matcher   pid={os.getpid()}] TRADE  "
                   f"#{trade['trade_id']} — buy #{trade['buy_order_id']} x "
                   f"sell #{trade['sell_order_id']}  "
-                  f"{trade['quantity']} @ {trade['price']:.2f}")
+                  f"{trade['quantity']} @ {trade['price']:.2f}  "
+                  f"(latency: {trade['latency_ns'] / 1000:.2f}µs)")
+            trades_since_last_summary += 1
+
+        if trades_since_last_summary >= 10:
+            stats = book.get_latency_stats()
+            print(f"[matcher   pid={os.getpid()}] STATS  "
+                  f"n={stats['count']}  "
+                  f"p50={stats['p50_ns']/1000:.2f}µs  "
+                  f"p99={stats['p99_ns']/1000:.2f}µs  "
+                  f"p999={stats['p999_ns']/1000:.2f}µs  "
+                  f"max={stats['max_ns']/1000:.2f}µs")
+            trades_since_last_summary = 0
 
 
 def main():

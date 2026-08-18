@@ -70,7 +70,7 @@ presentation.
 pytest -v
 ```
 
-78 tests should currently pass. `matching_engine/tests/` will skip
+94 tests should currently pass. `matching_engine/tests/` will skip
 with a clear message (not fail) if you haven't run the build step
 above yet.
 

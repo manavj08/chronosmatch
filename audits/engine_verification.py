@@ -27,7 +27,7 @@ This script covers what Day 5's unit tests don't:
    moment an order is written into the ring buffer to the moment its
    resulting trade is recorded, using time.perf_counter_ns() (matches
    the spec's stated instrumentation tool, ahead of the full latency
-   pipeline scheduled for Day 12-13). Reports actual microsecond
+   pipeline scheduled for Day 12). Reports actual microsecond
    numbers rather than just asserting "it works."
 
 Honesty notes:
@@ -188,8 +188,9 @@ def main():
     print(f"Typical (p50) latency on this machine: {stats['p50_us']:.2f} microseconds.")
     print("(Single-core sandbox measurement — see this script's module")
     print(" docstring for what that does and doesn't prove about production")
-    print(" hardware. Full nanosecond entry/exit instrumentation and the")
-    print(" spec's <50µs target are formally addressed Day 12-13.)")
+    print(" hardware. Day 12 added the engine's own internal nanosecond")
+    print(" entry/exit instrumentation on every trade -- see")
+    print(" matching_engine/tests/test_latency_instrumentation.py.)")
     print("=" * 70)
 
 
