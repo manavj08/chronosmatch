@@ -1,8 +1,12 @@
 __pycache__/
 *.pyc
 ring_buffer.mem
+ring_buffer.mem.lock
 *.so
 *.pyd
 matching_engine/order_book.c
 matching_engine/order_book.html
 matching_engine/build/
+chronosmatch_ledger.db
+database/tests/test_ledger_temp.db
+database/tests/test_flusher_temp.db

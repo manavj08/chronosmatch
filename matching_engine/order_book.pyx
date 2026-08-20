@@ -582,6 +582,41 @@ cdef class OrderBookCython:
             for i in range(self._trade_count)
         ]
 
+    @property
+    def trade_count(self):
+        """Day 14: total trades recorded so far. A flush service uses
+        this to remember its own position (e.g. 'I've flushed up to
+        index N') and only pull new trades next time, instead of
+        re-reading the entire history on every flush cycle."""
+        return self._trade_count
+
+    cpdef list get_trades_since(self, int64_t start_index):
+        """Day 14: returns trades from `start_index` onward (Python
+        slice semantics --- 0-based, exclusive of nothing before
+        start_index, inclusive of everything from there to the most
+        recent trade). Used by database/trade_flusher.py to pull only
+        NEW trades each flush cycle rather than the whole history ---
+        important once trade_count is in the hundreds of thousands,
+        where re-serializing the full list every cycle would get
+        slower over time for no reason."""
+        cdef int64_t i
+        cdef int64_t safe_start = start_index if start_index >= 0 else 0
+        if safe_start >= self._trade_count:
+            return []
+        return [
+            {
+                "trade_id": self._trades_c[i].trade_id,
+                "buy_order_id": self._trades_c[i].buy_order_id,
+                "sell_order_id": self._trades_c[i].sell_order_id,
+                "price": self._trades_c[i].price,
+                "quantity": self._trades_c[i].quantity,
+                "entry_timestamp": self._trades_c[i].entry_timestamp,
+                "exit_timestamp": self._trades_c[i].exit_timestamp,
+                "latency_ns": self._trades_c[i].latency_ns,
+            }
+            for i in range(safe_start, self._trade_count)
+        ]
+
     cpdef dict get_top_levels(self, int depth=5):
         """Returns the top N PRICE LEVELS per side (not N individual
         orders) --- same public contract as Day 6 had, since Day 6's

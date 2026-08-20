@@ -1011,3 +1011,96 @@ keep precise.
 ### Tests
 `pytest -v` → 94/94 passing (86 previous + 8 new latency metrics
 tests).
+
+## Day 14 — SQLite trade ledger + async background flusher
+
+### What this adds
+Per spec: "Write a background process that asynchronously flushes the
+matched trades from the mmap buffer to a permanent SQLite/ClickHouse
+ledger for auditing." Built both halves: the ledger (schema + CRUD)
+and the async flush service connecting it to the live engine.
+
+### A terminology clarification, stated honestly
+The spec phrase "flushes ... from the mmap buffer" doesn't quite match
+this system's actual data flow: the mmap ring buffer only ever holds
+INCOMING orders waiting to be matched. By the time a trade exists at
+all, the engine has already recorded it in its own trade history —
+it's never sitting in the ring buffer. The flusher reads from
+`OrderBookCython`'s trade history (the authoritative record of
+completed trades), not from the ring buffer. Documented directly in
+`trade_flusher.py`'s module docstring so this doesn't create a false
+impression of a second, separate data source.
+
+### Design
+- **`database/ledger.py`**: SQLite schema (one `trades` table, indexed
+  on `exit_timestamp`), `save_trade()`/`save_trades_batch()` (uses
+  `INSERT OR IGNORE` on the `trade_id` primary key — flushing the same
+  trade twice, e.g. after a flusher restart, is a safe no-op rather
+  than a duplicate row or a crash), `get_recent_trades()`,
+  `get_trade_history()` (paginated), `get_statistics()`,
+  `clear_database()`.
+- **SQLite chosen over ClickHouse**, stated plainly: simpler, no
+  separate server process, more than adequate for this project's
+  scale. ClickHouse would be the natural production upgrade for real
+  HFT write volume, but adds real operational complexity not needed
+  to prove the concept here.
+- **`database/trade_flusher.py`**: `TradeFlusher`, an asyncio service
+  with the same `start()`/`stop()`/`pause()`/`resume()` shape as
+  `simulator/market_firehose.py`. Flushes on an interval (default
+  100ms) rather than after every single trade — flushing per-trade
+  would put a disk write on the matching engine's critical path,
+  defeating the point of keeping matching itself fast and GC-free.
+  Batches all new trades into one transaction per cycle.
+- **New engine methods** (`matching_engine/order_book.pyx`):
+  `trade_count` (property) and `get_trades_since(start_index)` — let
+  the flusher pull only NEW trades each cycle instead of re-reading
+  and re-serializing the entire trade history (which would get slower
+  as trades accumulate, unnecessarily) every 100ms.
+
+### Verified, not just written
+- Manual end-to-end check first: produced trades while the flusher
+  ran in the background, confirmed the ledger's trade count matched
+  the engine's exactly, with sensible latency values once realistic
+  timestamps were used (an early manual test with fake sequential
+  timestamps produced a nonsensical multi-second "average latency" —
+  correctly diagnosed as bad test input, not a flusher bug, before
+  writing the real test suite).
+- `run_persistence_demo.py` — new dedicated demo (kept separate from
+  `run_demo.py` rather than risking a change to its already-verified
+  synchronous loop, same reasoning `run_dashboard_demo.py` was kept
+  separate): a real generator process + a matcher process running
+  matching and the async flusher concurrently in one event loop.
+  Ran it for real: 54 trades matched, 54 flushed, 54 confirmed in the
+  ledger — exact match, printed by the demo itself. Then independently
+  re-verified by opening the resulting `chronosmatch_ledger.db` file
+  in a completely separate, fresh Python process (not trusting the
+  demo's own self-report) — confirmed 54 real rows with real trade
+  data.
+
+### Added
+- `database/ledger.py`, `database/trade_flusher.py`
+- `database/tests/test_ledger.py` — 10 tests: schema creation,
+  save/retrieve, batch insert, duplicate-safety, recency ordering,
+  chronological ordering, pagination, empty-state statistics,
+  aggregation correctness, clear-without-dropping-schema
+- `database/tests/test_trade_flusher.py` — 8 tests: immediate
+  `flush_now()`, automatic background flushing, only-new-trades-per-
+  cycle efficiency, pause/resume behavior, exact field-for-field
+  round-trip correctness (including Day 12's latency instrumentation
+  surviving the trip into SQLite unchanged), stats shape, no-op flush
+  on an empty book
+- `matching_engine/tests/test_trade_history_slicing.py` — 8 tests for
+  the new `get_trades_since()`/`trade_count` engine surface, including
+  a simulation of exactly how the real flusher calls it repeatedly
+  (confirms the union of all incremental pulls covers the full trade
+  history with no gaps and no overlap)
+- `run_persistence_demo.py`
+
+### Verified after the change
+- All 94 previously-passing tests (Days 1-13) still pass
+- `run_demo.py` re-run end to end: unaffected, still works (the new
+  engine methods are additive)
+
+### Tests
+`pytest -v` → 120/120 passing (94 previous + 26 new: 10 ledger + 8
+flusher + 8 trade-history-slicing).

@@ -70,7 +70,7 @@ presentation.
 pytest -v
 ```
 
-94 tests should currently pass. `matching_engine/tests/` will skip
+120 tests should currently pass. `matching_engine/tests/` will skip
 with a clear message (not fail) if you haven't run the build step
 above yet.
 
@@ -112,6 +112,24 @@ environments, some IDE "run" panels that don't allocate a real
 terminal). If you see a `cbreak() returned ERR` error, run it directly
 in Command Prompt/PowerShell/a real terminal window instead.
 
+## 5c. Run the persistence (SQLite ledger) demo
+
+```
+python run_persistence_demo.py
+```
+
+Real generator process + a matcher process that both matches orders
+and runs the async trade flusher concurrently. Produces a real SQLite
+file, `chronosmatch_ledger.db`, in the project root. At the end, the
+demo prints the engine's trade count and the ledger's trade count and
+confirms they match. Inspect the file yourself afterward:
+
+```
+python -c "import sqlite3; c = sqlite3.connect('chronosmatch_ledger.db'); print(c.execute('SELECT * FROM trades LIMIT 10').fetchall())"
+```
+
+(or use any SQLite browser/CLI tool you have installed).
+
 ## 6. Project structure
 
 | Folder | Purpose | Spec module |
@@ -121,6 +139,7 @@ in Command Prompt/PowerShell/a real terminal window instead.
 | `engine/` | Pure-Python reference implementation, used to verify the Cython version's correctness | — |
 | `simulator/` | Order generation (asyncio firehose, in progress) | Market Simulator |
 | `dashboard/` | curses terminal latency UI (live Bid/Ask done Day 7; latency numbers Day 12-13) | Latency Monitor |
+| `database/` | SQLite trade ledger + async flusher (Day 14) | (Resiliency, Week 4) |
 | `archive_web_dashboard/` | Earlier self-directed plan (FastAPI + web UI), kept for reference, not part of the active deliverable | — |
 
 ## Troubleshooting
