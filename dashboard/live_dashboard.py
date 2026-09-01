@@ -1,15 +1,22 @@
 """
 dashboard/live_dashboard.py
 -----------------------------
-MEMBER C's LATENCY MONITOR (Day 7).
+MEMBER C's LATENCY MONITOR (Day 7, latency display added in the
+dashboard hardening pass).
 
 Per spec: "A live terminal graph measuring the end-to-end latency in
-microseconds (us)." Day 7's scope specifically is the live Bid/Ask
-top-of-book display; the latency numbers shown here are read counts
-and simple timing, not yet the nanosecond entry/exit instrumentation
-(that's Day 12-13 --- see TASKS.md). Fields are already laid out for
-it so this file won't need restructuring later, only real numbers
-plugged in.
+microseconds (us)." Day 7's scope was the live Bid/Ask top-of-book
+display; the latency numbers shown then were read counts and simple
+timing, not the real nanosecond entry/exit instrumentation, which
+didn't land in the ENGINE until Day 12-13 (matching_engine/order_book.pyx's
+get_latency_stats() -- p50/p95/p99/p999/min/mean/max, computed from
+real per-trade timestamps captured inside the nogil matching loop).
+Day 7's docstring said the fields were "already laid out" for this,
+but that turned out not to be true on inspection -- no latency numbers
+were actually rendered anywhere in _draw(). Closed directly here: the
+dashboard now calls the engine's own get_latency_stats() every frame
+and renders p50/p95/p99/p999 in microseconds, which is the literal
+spec requirement this file exists to satisfy.
 
 This replaces the old dashboard_starter.py skeleton (see that file's
 own "WHAT TO DO NEXT" comments, written before the spec pivot ---
@@ -38,6 +45,44 @@ from shared.ring_buffer import RingBuffer
 WHALE_THRESHOLD = 50  # quantity above which a trade gets highlighted (Day 16-17 will make this configurable/polished)
 
 
+def format_latency_line(stats: dict) -> str:
+    """Pure formatting function for the engine's get_latency_stats()
+    dict, independently testable without curses or a real terminal.
+    Converts nanoseconds (the engine's native unit) to microseconds
+    (the spec's stated display unit: "measuring the end-to-end latency
+    in microseconds (us)"). Handles the empty-book case (count == 0)
+    the same way get_latency_stats() itself does -- zeroed fields, not
+    an error -- so the dashboard doesn't need a separate branch for
+    "no trades yet".
+
+    Reading the numbers this displays -- important caveat, found
+    during pseudo-terminal verification of this exact display: at the
+    default demo order rate (run_dashboard_demo.py), this loop reads
+    and processes only ONE order per redraw frame (~50ms, matching
+    stdscr.timeout(50)), which is far slower than the generator can
+    produce orders. entry_timestamp is set when an order is GENERATED
+    (simulator/order_generator.py), not when this loop gets around to
+    reading it -- so at the demo's default rate, most of the displayed
+    latency is real queueing time in the ring buffer waiting for this
+    single-order-per-frame loop, not the engine's own matching speed
+    (which is sub-microsecond internally -- see
+    matching_engine/tests/test_latency_instrumentation.py and the
+    engine-only benchmarks elsewhere in this project for that number
+    measured without this loop's frame-rate ceiling in the way). This
+    display is still an honest, real end-to-end latency measurement
+    for THIS specific pipeline configuration; it just isn't a measure
+    of the matching engine's own speed in isolation, and the two
+    should not be confused when reading the screen.
+    """
+    if stats["count"] == 0:
+        return "Latency: (no trades yet)"
+    return (f"Latency (us)  p50={stats['p50_ns']/1000:.1f}  "
+            f"p95={stats['p95_ns']/1000:.1f}  "
+            f"p99={stats['p99_ns']/1000:.1f}  "
+            f"p999={stats['p999_ns']/1000:.1f}  "
+            f"(n={stats['count']:,})")
+
+
 def format_whale_line(trade: dict) -> str:
     """Pure formatting function, independently testable without curses
     or a real terminal. Used by run_dashboard() below and covered
@@ -58,13 +103,23 @@ def update_whale_lines(whale_lines: list, trades: list, threshold: int = WHALE_T
     return whale_lines[:max_lines]
 
 
-def run_dashboard(stdscr, ring_buffer_capacity: int = 256, duration_seconds: float = None):
+def run_dashboard(stdscr, ring_buffer_capacity: int = 256, duration_seconds: float = None,
+                   on_frame=None):
     """
     Real matcher + live display, combined into one process (Day 7
     keeps this simple: one process reads and renders; if a future day
     needs the matching and the display decoupled into separate
     processes communicating over their own IPC, that's a deliberate
     later change, not an oversight).
+
+    on_frame: optional callback, called once per redraw frame as
+    on_frame(book, orders_processed, trades_matched) -- lets other
+    scripts (see run_full_integration_demo.py) attach a side effect
+    like periodically flushing new trades to the SQLite ledger,
+    without duplicating this loop or reaching into its internals.
+    Exceptions from on_frame are caught and ignored per-frame (same
+    reasoning as TradeFlusher's own error handling: a side effect
+    failing must never crash the live display), not raised.
     """
     from order_book import OrderBookCython  # the compiled .so
 
@@ -91,14 +146,22 @@ def run_dashboard(stdscr, ring_buffer_capacity: int = 256, duration_seconds: flo
             trades_matched += len(result["trades"])
             recent_whale_lines = update_whale_lines(recent_whale_lines, result["trades"])
 
-        _draw(stdscr, book, orders_processed, trades_matched, recent_whale_lines)
+        if on_frame is not None:
+            try:
+                on_frame(book, orders_processed, trades_matched)
+            except Exception:
+                pass  # a side-effect failure must never crash the live display
+
+        latency_stats = book.get_latency_stats()
+        _draw(stdscr, book, orders_processed, trades_matched, recent_whale_lines, latency_stats)
 
         key = stdscr.getch()
         if key == 3:  # Ctrl+C
             break
 
 
-def _draw(stdscr, book, orders_processed: int, trades_matched: int, whale_lines: list):
+def _draw(stdscr, book, orders_processed: int, trades_matched: int, whale_lines: list,
+          latency_stats: dict):
     stdscr.erase()
     max_y, max_x = stdscr.getmaxyx()
 
@@ -139,7 +202,10 @@ def _draw(stdscr, book, orders_processed: int, trades_matched: int, whale_lines:
 
     safe_addstr(row, 0, f"Orders processed: {orders_processed}")
     safe_addstr(row + 1, 0, f"Trades matched:   {trades_matched}")
-    row += 3
+    row += 2
+
+    safe_addstr(row, 0, format_latency_line(latency_stats), curses.A_BOLD)
+    row += 2
 
     if whale_lines:
         safe_addstr(row, 0, "Recent whale trades:", curses.A_BOLD)

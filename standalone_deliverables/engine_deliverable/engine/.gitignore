@@ -1,0 +1,12 @@
+# Compiled Cython artifacts — platform-specific, rebuilt locally via
+# `python setup.py build_ext --inplace`, not committed.
+*.c
+*.so
+*.pyd
+*.html
+build/
+
+# Python
+__pycache__/
+*.pyc
+.pytest_cache/

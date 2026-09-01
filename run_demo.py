@@ -112,9 +112,10 @@ def matcher_process():
             continue
 
         result = book.match_order(order)
-        levels = book.get_top_levels(depth=3)
-        best_bid = levels["bids"][0]["price"] if levels["bids"] else None
-        best_ask = levels["asks"][0]["price"] if levels["asks"] else None
+        best_bid_level = book.best_bid()
+        best_ask_level = book.best_ask()
+        best_bid = best_bid_level["price"] if best_bid_level else None
+        best_ask = best_ask_level["price"] if best_ask_level else None
         print(f"[matcher   pid={os.getpid()}] read   "
               f"order #{order['order_id']:<4} {order['side']} "
               f"{order['quantity']:>3} @ {order['price']:.2f}   "

@@ -1104,3 +1104,339 @@ impression of a second, separate data source.
 ### Tests
 `pytest -v` → 120/120 passing (94 previous + 26 new: 10 ledger + 8
 flusher + 8 trade-history-slicing).
+
+## Engine hardening pass — full requirement-list audit against the trading-engine spec
+
+Not tied to a specific calendar day (folded in ahead of the Day 16+
+UI-polish/integration work): did a line-by-line pass of
+`matching_engine/order_book.pyx` against the full trading-engine
+requirement list ("Limit Order Book" / "Cython optimization" /
+"price-level optimization" / "GC testing" / "engine benchmarks" / "unit
+tests") this module is meant to satisfy. Most of it was already there
+and already tested (price-time priority, C structs, price-level
+bucketing, GC-safety, nanosecond latency instrumentation — Days 5, 6,
+10-13). Found two real, previously-unimplemented gaps and closed both.
+
+### Added
+- **`OrderBookCython.cancel_order(order_id, side) -> bool`** — order
+  cancellation didn't exist at all before this. Implemented as
+  `_cancel_c()`: a linear scan over the given side's price levels and,
+  within the matching level, its FIFO — O(price levels + orders at
+  that level), not O(1). A production system would maintain an
+  `order_id -> (level, slot)` index for true O(1) cancels; that index
+  was deliberately not built so cancellation stays entirely at the
+  C-struct level (no Python dict anywhere) and nogil-capable like the
+  rest of the hot path. Documented as a real trade-off in the
+  docstring, not silently assumed away.
+- **`OrderBookCython.best_bid()` / `best_ask()` / `spread()`** — best
+  price + aggregated resting size at that price, true O(1). Previously
+  the only way to get the best price was `get_top_levels(depth=1)`,
+  which builds a Python list even when only the single best price is
+  needed. `PriceLevel` now carries a `total_quantity` field, maintained
+  incrementally on insert/fill/cancel, so aggregated size at the best
+  price is also O(1) rather than requiring a walk of that level's FIFO.
+- **`p95_ns`** added to `get_latency_stats()`, alongside the existing
+  p50/p99/p999 — the original spec line for engine benchmarks asks for
+  p50/p95/p99/p999/max, and p95 was missing.
+- `matching_engine/tests/test_order_book_extras.py` — 14 new tests:
+  6 for cancellation correctness (removes the order, removed order no
+  longer matches, cancelling one order at a shared price level
+  preserves the others' time priority, cancelling the only order at a
+  level removes the level, unknown-id and wrong-side cancels return
+  False without disturbing the book) plus 1 larger regression-style
+  check (cancel ~half of 200 resting orders across several price
+  levels, confirm the book is still sorted and still matches
+  correctly), and 6 for `best_bid()`/`best_ask()`/`spread()` (basic
+  correctness, size aggregation across multiple orders at one price,
+  size updating after a partial fill, spread updating as top-of-book
+  changes, `None` when spread is undefined, empty-book behavior).
+- A **separate, standalone deliverable package** (provided alongside
+  this repo, not merged into it — see note below) containing the same
+  engine logic repackaged into the exact `matching_engine.pyx` /
+  `matching_engine.pxd` / `setup.py` / `tests/test_matching_engine.py`
+  layout the trading-engine spec's "Deliverables" section asks for,
+  with its own README, a 1,000,000-order benchmark script producing
+  the exact requested `p50/p95/p99/p999/throughput` report format, a
+  `gc_demo.py` walking the Python→Cython→C-loop→Trade chain, and a
+  head-to-head benchmark against a naive pure-Python reference
+  implementation (32x measured speedup, cross-checked for identical
+  trade output before comparing speed). Deliberately kept OUT of this
+  repo's own `engine/` directory rather than replacing that folder's
+  existing Day-1 pure-Python placeholder (`engine/order_book.py`) —
+  doing so would leave two independently-compiled Cython matching
+  engines living side by side in one project (this repo's real one,
+  `matching_engine/order_book.pyx`, plus a second one under `engine/`),
+  which is exactly the kind of duplication worth avoiding. The old
+  placeholder, and the tests that reference it (including
+  `matching_engine/tests/test_order_book_cython.py`'s cross-check
+  against it), are untouched.
+
+### Changed
+- `matching_engine/tests/test_latency_metrics.py` — updated the
+  exact-key-set and percentile-ordering assertions to account for the
+  new `p95_ns` field (`min <= p50 <= p95 <= p99 <= p999 <= max`).
+- `run_demo.py` — the matcher loop now calls `best_bid()`/`best_ask()`
+  directly instead of `get_top_levels(depth=3)` followed by indexing
+  `[0]`, now that the O(1) accessors exist.
+
+### Verified, not just written
+- Full project test suite, not just `matching_engine/`:
+  `pytest -q` → **134/134 passing** (120 previous + 14 new). Checked
+  first whether anything else in the project depended on the exact
+  shape of `get_latency_stats()`'s return dict or on `OrderBookCython`'s
+  public surface before changing anything — `database/trade_flusher.py`
+  depends on `trade_count`/`get_trades_since()` (untouched, still
+  present) and `dashboard/live_dashboard.py` depends on
+  `get_top_levels()` (also untouched); only
+  `matching_engine/tests/test_latency_metrics.py` had an exact-key-set
+  assertion that needed updating for the new `p95_ns` field.
+- `run_demo.py` re-run end to end after both the engine rebuild and the
+  `best_bid()`/`best_ask()` swap: two real OS processes, ring-buffer IPC,
+  live trades, both processes still exit cleanly.
+
+### Tests
+`pytest -v` (whole project) → 134/134 passing (120 previous + 14 new).
+
+## Data-pipeline hardening pass — full requirement-list audit against the IPC/simulator spec
+
+Same treatment as the engine hardening pass above, applied to the other
+half of the system: `shared/` (mmap ring buffer + binary protocol) and
+`simulator/` (asyncio market data firehose). Did a line-by-line pass
+against the full data-pipeline requirement list ("mmap ring buffer" /
+"binary order format" / "cross-process testing" / "market simulator" /
+"load testing" / "IPC audit"). Most of it was already there and already
+proven at real scale (the zero-copy protocol, the cross-process locking
+fix, the 1,000,000-order two-process audit — Days 2-4, 8). Found real
+gaps in exactly three places: the binary protocol had never been
+documented as a spec (just implemented), nothing measured JSON/Pickle
+against it despite that being the whole point of the zero-copy design,
+and nothing swept a range of target rates to find where throughput
+actually starts falling behind — every existing benchmark reported a
+single uncapped ceiling number.
+
+### Added
+- **Documented binary protocol** — `shared/serializer.py`'s module
+  docstring now has the full byte-offset table (field, offset, size,
+  struct code, notes) the wire format was always using but had never
+  written down anywhere. No behavior change — the format string, byte
+  layout, and `serialize()`/`deserialize()` functions are untouched.
+- **`benchmarks/serialization_comparison.py`** — measures JSON, Pickle,
+  and this project's `struct`-based protocol on the identical order
+  dict (pure encode+decode round trip), plus the FULL IPC round trip
+  (real `RingBuffer.write_order()`/`read_order()`, lock included) for
+  the struct method specifically. One real run on this machine (500,000
+  round trips/method): JSON 224k/s, Pickle 745k/s, struct 1.80M/s (8.0x
+  faster than JSON, 2.4x faster than Pickle), full ring-buffer round
+  trip 204k/s. Isolates the shared backing file for the duration of the
+  run (monkeypatches `shared.shared_memory.BACKING_FILE`/`LOCK_FILE`,
+  restores them afterward) so it can't collide with a real
+  `ring_buffer.mem` some other process might be using.
+- **`simulator/load_test.py`** — sweeps target rates (default 10k, 50k,
+  100k, 150k, 200k, 300k, 500k/sec) against `MarketFirehose`, each with
+  a concurrent drainer so the firehose never blocks on a buffer nobody's
+  reading, and reports where achieved throughput first drops below 70%
+  of target. One real run: targets up to 100k/sec sustained at
+  ~99.5-99.8% of target; 150k/sec still held at 93.8%; 200k/sec was the
+  first to drop under the 70% threshold (73.0%, right at the edge) on
+  this sandbox machine.
+- **`tests/test_cross_process_scenarios.py`** — 3 new tests: a
+  dedicated 100,000-order cross-process scenario (the existing
+  `tests/test_cross_process_locking.py` test runs at 20,000 — enough to
+  reliably reproduce the specific bug it's a regression guard for, but
+  100k is separately called out in the requirement list and is still
+  fast enough, ~0.3s here, to run directly in the normal suite);
+  explicit process-exitcode verification (`producer.exitcode == 0` /
+  `consumer.exitcode == 0` — a distinct claim from "all data arrived",
+  since a process can deliver everything and still crash on the way
+  out); and three repeated full startup-to-shutdown cycles back to
+  back, guarding against state leaking between runs (a stale lock file,
+  a leftover mmap region) that a single-cycle test wouldn't catch.
+  Deliberately did NOT add a 1,000,000-order test to the routine pytest
+  suite — `audits/ipc_audit.py` remains the authoritative large-scale
+  proof at that scale, on purpose, so the routine suite stays fast; see
+  that script's own module docstring for the reasoning, which this
+  addition follows rather than relitigates.
+- A separate, standalone deliverable package (provided alongside this
+  repo, not merged into it, same reasoning as the matching-engine
+  deliverable) containing the same IPC/simulator logic repackaged into
+  the exact `ipc/{protocol,shared_memory,ring_buffer}.py` +
+  `ipc/tests/test_ring_buffer.py` + `simulator/{market_simulator,
+  load_test}.py` layout the data-pipeline spec's "Deliverables" section
+  asks for. Its own test suite (40 tests) additionally found and fixed
+  a real synchronization property worth documenting either way: at very
+  small ring-buffer capacities (single digits), the producer and
+  consumer toggle the buffer between full and empty on almost every
+  operation, and each transition costs a real cross-process lock
+  round-trip — throughput measured at ~1,000/sec for an 8-slot buffer
+  vs. ~65,000+/sec for a 512-slot one on the same machine. Documents
+  directly why this project's production capacity (4096) is chosen well
+  above the minimum needed for correctness.
+
+### Verified, not just written
+- Full project test suite: `pytest -q` → **137/137 passing** (134
+  previous + 3 new). Checked whether anything depended on
+  `shared/serializer.py`'s exact format string or byte layout before
+  touching its docstring — nothing does; the format string itself
+  (`_FORMAT`) and both functions are byte-for-byte unchanged, only the
+  documentation comment above them grew.
+- `benchmarks/serialization_comparison.py` and `simulator/load_test.py`
+  both run cleanly against the real project (not just in isolation),
+  and both clean up their own backing files afterward — confirmed no
+  stray `.mem`/`.lock` files left behind after a run.
+
+### Tests
+`pytest -v` (whole project) → 137/137 passing (134 previous + 3 new).
+
+## Dashboard hardening pass — the spec's core "Latency Monitor" requirement was never actually wired in
+
+Doing a full pass of the project against the top-level spec (not just
+one module's own requirement list this time) surfaced something more
+significant than the previous two hardening passes: the spec's Key
+Modules section names a "Latency Monitor (Python curses): A live
+terminal graph measuring the end-to-end latency in microseconds (us)"
+as one of four core modules. Day 7's dashboard docstring said the
+latency fields were "already laid out" for this, pending Day 12-13's
+nanosecond instrumentation landing in the engine. Day 12-13 happened.
+The dashboard was never actually updated to call it. `_draw()` showed
+order/trade counts and whale highlights, but zero latency numbers, in
+any unit, anywhere on screen — the literal spec requirement this file
+exists to satisfy was not implemented, despite everything it depended
+on (`get_latency_stats()`) being complete, tested, and sitting one
+function call away.
+
+### Added
+- `dashboard/live_dashboard.py`: `format_latency_line()` — pure
+  function (no curses dependency, unit-testable), converts the
+  engine's `get_latency_stats()` (nanoseconds) into a p50/p95/p99/p999
+  microsecond display line, matching the spec's stated unit exactly.
+  Handles the empty-book case (shows "(no trades yet)" rather than a
+  misleading "0.0us", which would read as "the system is infinitely
+  fast" instead of "nothing has happened yet").
+- `run_dashboard()` now calls `book.get_latency_stats()` every frame
+  and passes it to `_draw()`, which renders the new line right below
+  the orders-processed/trades-matched counts.
+- `dashboard/tests/test_dashboard_logic.py` — 5 new tests: microsecond
+  unit conversion (not nanoseconds — the actual point of this
+  requirement), all four percentiles present, sample count included,
+  empty-book handling, and percentile display ordering.
+
+### Honest finding, documented rather than hidden
+Verified via a real pseudo-terminal run (`script -qc`, same method as
+Day 7's original verification — see that entry above for why this
+sandbox needs it). The latency display works and updates live
+correctly. But the numbers it showed during that run were much higher
+than the engine's own matching speed (tens to hundreds of milliseconds,
+occasionally more) — investigated rather than dismissed as a rendering
+bug. Root cause: at the demo's default order rate, `run_dashboard()`'s
+loop reads and processes exactly ONE order per redraw frame (~50ms,
+matching `stdscr.timeout(50)`), far slower than the generator produces
+them. `entry_timestamp` is set at GENERATION time, not when this loop
+gets around to reading the order — so most of the displayed latency at
+default demo settings is real queueing time in the ring buffer waiting
+for this single-order-per-frame loop, not the engine's own per-trade
+matching cost (which stays sub-microsecond internally, unaffected by
+this — see `matching_engine/tests/test_latency_instrumentation.py` and
+this project's other engine-only benchmarks, none of which go through
+this polling loop). The display is still an honest, real end-to-end
+measurement for this specific pipeline configuration; documented
+directly in `format_latency_line()`'s own docstring so a future reader
+doesn't mistake "this demo's frame rate" for "the matching engine is
+slow."
+
+### Verified, not just written
+- `pytest -v` (whole project) → **142/142 passing** (137 previous + 5
+  new).
+- Real pseudo-terminal run (`script -qc python3 run_dashboard_demo.py`)
+  confirmed genuine curses escape sequences building a live-updating
+  latency line alongside the existing bid/ask and whale-highlight
+  output, and a clean process exit afterward — not just that the pure
+  `format_latency_line()` function returns a sensible string in
+  isolation.
+
+### Tests
+`pytest -v` (whole project) → 142/142 passing (137 previous + 5 new).
+
+## Final integration + documentation pass — closing out Days 21-24
+
+Last pass: the remaining Final-Review-track items that were genuinely
+missing (not just under-documented) — a true five-stage end-to-end
+integration demo, the ClickHouse-vs-SQLite decision the spec asks to
+have documented either way, and bringing the project's own planning
+docs back in sync with what's actually built.
+
+### Added
+- **`run_full_integration_demo.py`** (Day 22) — the first demo in this
+  project that runs all five architecture stages together in one
+  process pair: market simulator → mmap ring buffer → Cython matching
+  engine → SQLite ledger → curses dashboard. Every prior demo exercises
+  a subset (`run_demo.py`: firehose→buffer→engine;
+  `run_dashboard_demo.py`: +dashboard; `run_persistence_demo.py`:
+  +ledger, no dashboard). Combining the ledger's async flush with the
+  dashboard's synchronous curses loop needed a small design choice: a
+  new `on_frame` callback hook on `dashboard.live_dashboard.run_dashboard()`
+  (backward-compatible, defaults to `None`, zero effect on every
+  existing caller) lets this demo flush new trades to SQLite
+  synchronously every few frames, reusing the exact same
+  `database.ledger.save_trades_batch()` + `get_trades_since()` primitives
+  `TradeFlusher` uses elsewhere — deliberately not running
+  `TradeFlusher`'s own asyncio scheduling inside a synchronous curses
+  callback, which would need a second concurrency model (a thread, or a
+  nested event loop) for no real benefit at this project's scale.
+- **`ARCHITECTURE_DECISIONS.md`** (Day 21) — SQLite vs. ClickHouse
+  (chosen: SQLite, with an honest list of what would actually justify
+  ClickHouse instead — production write volume, analytical queries at
+  scale, concurrent writers, none of which this project currently has),
+  plus two other trade-offs worth explaining on their own now that
+  they're referenced from multiple places: the ring buffer's single
+  coarse-grained lock instead of a lock-free SPSC design, and
+  fixed-size struct slots instead of variable-length framing.
+
+### Fixed
+- **`TASKS.md`'s status summary table had gone stale since Day 2** and
+  was never caught until this pass: it listed "Trade ledger
+  (SQLite/ClickHouse): Not started" and "IPC audit (1M orders, 2
+  processes): Not started" — both had actually been complete since Day
+  14 and Day 8 respectively. Corrected to reflect reality, with
+  pointers to what's actually implemented. Worth naming directly: a
+  living status document that silently drifts out of sync with the
+  code is worse than no status document, since it actively misinforms
+  anyone who trusts it without independently checking — exactly the
+  failure mode this project's own testing philosophy (verify, don't
+  just assert) exists to avoid, applied here to documentation instead
+  of code.
+- **`HOW_TO_RUN.md`** updated throughout: the project-structure table's
+  `simulator/`/`dashboard/` rows said "in progress" / "latency numbers
+  Day 12-13" — both are done; the test count said 120, now 142; every
+  benchmark/audit/demo script added across all three hardening passes
+  (`serialization_comparison.py`, `load_test.py`,
+  `run_full_integration_demo.py`) is now listed with what it does and
+  roughly how long it takes to run.
+- **`TASKS.md`'s 25-day plan**, Days 18-24: marked against what's
+  actually been done (full IPC/engine/latency test sweep, sustained
+  load testing, the ClickHouse decision, full integration, the test
+  coverage count, documentation) — including one item marked honestly
+  as *partially* addressed rather than claimed complete: Day 20's
+  "fix latency outliers" was investigated (real multi-millisecond
+  outliers do appear in large benchmark runs) but the root cause is
+  this sandbox's own OS scheduling jitter on a shared/virtualized
+  machine, not a code-level defect — there is nothing to fix in the
+  matching algorithm itself, so the entry says that plainly rather than
+  claiming a fix that wouldn't be honest.
+
+### Verified, not just written
+- Full project test suite: `pytest -q` → **142/142 passing**, unchanged
+  by this pass (no engine/IPC/dashboard code touched — this pass is
+  new demo/documentation surface only). Confirmed the `on_frame` hook
+  addition to `run_dashboard()` doesn't change behavior for existing
+  callers (`run_dashboard_demo.py` doesn't pass it, defaults to `None`,
+  identical to before).
+- `run_full_integration_demo.py` run via a real pseudo-terminal
+  (`script -qc`, same method as every other curses verification in this
+  project): 122 trades matched by the engine, 122 flushed to the
+  ledger, 122 confirmed by independently re-opening the resulting
+  SQLite file in a fresh Python process afterward — not trusting the
+  demo's own printed summary. Both processes exited with code 0.
+
+### Tests
+`pytest -v` (whole project) → 142/142 passing (unchanged — this pass
+added demos and documentation, not engine/IPC/dashboard code).

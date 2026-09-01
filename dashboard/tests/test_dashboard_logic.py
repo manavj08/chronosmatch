@@ -23,6 +23,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 
 from dashboard.live_dashboard import (
     WHALE_THRESHOLD,
+    format_latency_line,
     format_whale_line,
     update_whale_lines,
 )
@@ -36,6 +37,71 @@ def make_trade(trade_id, buy_id, sell_id, price, quantity):
         "price": price,
         "quantity": quantity,
     }
+
+
+def make_latency_stats(count=100, p50_ns=500, p95_ns=900, p99_ns=1500, p999_ns=3000,
+                        min_ns=200, mean_ns=600, max_ns=5000):
+    return {
+        "count": count, "min_ns": min_ns, "mean_ns": mean_ns, "max_ns": max_ns,
+        "p50_ns": p50_ns, "p95_ns": p95_ns, "p99_ns": p99_ns, "p999_ns": p999_ns,
+    }
+
+
+def test_format_latency_line_shows_microseconds_not_nanoseconds():
+    """The spec's stated display unit is microseconds -- this is the
+    core requirement the dashboard's latency display exists to
+    satisfy, so the unit conversion itself gets a direct test rather
+    than just checking that some numbers appear."""
+    stats = make_latency_stats(p50_ns=1500, p95_ns=2500, p99_ns=4000, p999_ns=8000)
+    line = format_latency_line(stats)
+    assert "1.5" in line   # 1500ns -> 1.5us
+    assert "2.5" in line   # 2500ns -> 2.5us
+    assert "4.0" in line   # 4000ns -> 4.0us
+    assert "8.0" in line   # 8000ns -> 8.0us
+    assert "us" in line.lower()
+
+
+def test_format_latency_line_includes_all_four_percentiles():
+    stats = make_latency_stats()
+    line = format_latency_line(stats)
+    assert "p50" in line
+    assert "p95" in line
+    assert "p99" in line
+    assert "p999" in line
+
+
+def test_format_latency_line_includes_sample_count():
+    stats = make_latency_stats(count=12345)
+    line = format_latency_line(stats)
+    assert "12,345" in line or "12345" in line
+
+
+def test_format_latency_line_handles_empty_book_without_crashing():
+    """get_latency_stats() returns all-zero fields with count == 0 for
+    an empty book (see matching_engine/order_book.pyx) -- the display
+    function must handle that gracefully rather than showing a
+    misleading '0.0us' latency (which would read as 'the system is
+    infinitely fast' rather than 'no trades have happened yet')."""
+    stats = make_latency_stats(count=0, p50_ns=0, p95_ns=0, p99_ns=0, p999_ns=0,
+                                min_ns=0, mean_ns=0, max_ns=0)
+    line = format_latency_line(stats)
+    assert "no trades" in line.lower()
+    assert "0.0" not in line  # must not present a fake zero-latency reading
+
+
+def test_format_latency_line_percentiles_are_correctly_ordered_in_a_realistic_sample():
+    """Sanity check with realistic, non-trivial values that the
+    formatted line reflects p50 <= p95 <= p99 <= p999 in the order
+    they're displayed (a transcription-order regression guard, not a
+    re-test of the engine's own percentile math, which is covered in
+    matching_engine/tests/test_latency_metrics.py)."""
+    stats = make_latency_stats(p50_ns=800, p95_ns=1600, p99_ns=3200, p999_ns=6400)
+    line = format_latency_line(stats)
+    p50_pos = line.index("p50")
+    p95_pos = line.index("p95")
+    p99_pos = line.index("p99=")  # distinguish from "p999"
+    p999_pos = line.index("p999")
+    assert p50_pos < p95_pos < p99_pos < p999_pos
 
 
 def test_format_whale_line_shape():

@@ -49,6 +49,7 @@ def test_empty_book_returns_zeroed_stats_not_an_error():
     assert stats["mean_ns"] == 0
     assert stats["max_ns"] == 0
     assert stats["p50_ns"] == 0
+    assert stats["p95_ns"] == 0
     assert stats["p99_ns"] == 0
     assert stats["p999_ns"] == 0
 
@@ -59,7 +60,8 @@ def test_stats_shape_has_all_expected_fields():
     stats = book.get_latency_stats()
 
     assert set(stats.keys()) == {
-        "count", "min_ns", "mean_ns", "max_ns", "p50_ns", "p99_ns", "p999_ns"
+        "count", "min_ns", "mean_ns", "max_ns",
+        "p50_ns", "p95_ns", "p99_ns", "p999_ns",
     }
 
 
@@ -71,7 +73,8 @@ def test_percentiles_are_correctly_ordered():
     stats = book.get_latency_stats()
 
     assert stats["min_ns"] <= stats["p50_ns"]
-    assert stats["p50_ns"] <= stats["p99_ns"]
+    assert stats["p50_ns"] <= stats["p95_ns"]
+    assert stats["p95_ns"] <= stats["p99_ns"]
     assert stats["p99_ns"] <= stats["p999_ns"]
     assert stats["p999_ns"] <= stats["max_ns"]
 
@@ -138,4 +141,5 @@ def test_single_trade_all_percentiles_equal_that_one_latency():
     stats = book.get_latency_stats()
 
     assert stats["count"] == 1
-    assert stats["min_ns"] == stats["p50_ns"] == stats["p99_ns"] == stats["p999_ns"] == stats["max_ns"]
+    assert (stats["min_ns"] == stats["p50_ns"] == stats["p95_ns"]
+            == stats["p99_ns"] == stats["p999_ns"] == stats["max_ns"])

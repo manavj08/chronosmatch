@@ -137,6 +137,11 @@ cdef struct PriceLevel:
                                 # advances on removal instead of shifting
                                 # the whole array on every fill, amortizing
                                 # the cost of removing from the front
+    int64_t total_quantity    # running sum of resting quantity at this
+                                # level, maintained incrementally on every
+                                # insert/fill/cancel so best_bid()/
+                                # best_ask() can report size in true O(1)
+                                # instead of summing the FIFO on each call
 
 
 cdef struct CTrade:
@@ -324,6 +329,7 @@ cdef class OrderBookCython:
 
             lvl.orders[lvl.head + lvl.count] = order
             lvl.count += 1
+            lvl.total_quantity += order.quantity
             return True
 
         else:
@@ -349,6 +355,7 @@ cdef class OrderBookCython:
             levels[idx].count = 1
             levels[idx].capacity = INITIAL_LEVEL_CAPACITY
             levels[idx].head = 0
+            levels[idx].total_quantity = order.quantity
             level_count_ptr[0] += 1
             return True
 
@@ -363,6 +370,71 @@ cdef class OrderBookCython:
             memmove(&levels[idx], &levels[idx + 1],
                     (level_count_ptr[0] - idx - 1) * sizeof(PriceLevel))
         level_count_ptr[0] -= 1
+
+    cdef bint _cancel_c(self, int64_t order_id, char side) noexcept nogil:
+        """Cancel a resting order by id. Scans price levels on the given
+        side (best price first) and, within each level, that level's own
+        FIFO, looking for a matching order_id.
+
+        Honest complexity: O(number of resting price levels + orders at
+        the matching level) --- a linear scan, not O(1). A production
+        system would maintain an order_id -> (level, slot) index (e.g. a
+        hash map) for true O(1) cancellation; that index is deliberately
+        not built here so cancellation stays entirely at the C-struct
+        level (no Python dict/object involved, same GC-safety guarantee
+        as the rest of this file) and nogil-capable like the matching
+        loop itself. Cancellation is not on the insert/match hot path
+        this project's benchmarks measure, so this trade-off is
+        reasonable for the current scope --- documented here rather than
+        silently assumed to be free.
+        """
+        cdef PriceLevel* levels
+        cdef int64_t* level_count_ptr
+        cdef bint is_buy_side = (side == b'B')
+        cdef int64_t i, j, k
+        cdef PriceLevel* lvl
+        cdef int64_t cancelled_qty
+
+        if is_buy_side:
+            levels = self._buy_levels
+            level_count_ptr = &self._buy_level_count
+        else:
+            levels = self._sell_levels
+            level_count_ptr = &self._sell_level_count
+
+        for i in range(level_count_ptr[0]):
+            lvl = &levels[i]
+            for j in range(lvl.head, lvl.head + lvl.count):
+                if lvl.orders[j].order_id == order_id:
+                    cancelled_qty = lvl.orders[j].quantity
+                    # Shift everything after j (within the active window)
+                    # down by one slot to close the gap.
+                    for k in range(j, lvl.head + lvl.count - 1):
+                        lvl.orders[k] = lvl.orders[k + 1]
+                    lvl.count -= 1
+                    lvl.total_quantity -= cancelled_qty
+                    if lvl.count == 0:
+                        self._remove_level_at(levels, level_count_ptr, i)
+                    return True
+        return False
+
+    cdef bint _best_bid_c(self, double* out_price, int64_t* out_qty) noexcept nogil:
+        """True O(1) best-bid lookup: price is always at levels[0], and
+        total resting quantity at that level is maintained incrementally
+        (PriceLevel.total_quantity) rather than summed on each call."""
+        if self._buy_level_count == 0:
+            return False
+        out_price[0] = self._buy_levels[0].price
+        out_qty[0] = self._buy_levels[0].total_quantity
+        return True
+
+    cdef bint _best_ask_c(self, double* out_price, int64_t* out_qty) noexcept nogil:
+        """See _best_bid_c --- same O(1) guarantee, opposite side."""
+        if self._sell_level_count == 0:
+            return False
+        out_price[0] = self._sell_levels[0].price
+        out_qty[0] = self._sell_levels[0].total_quantity
+        return True
 
     cdef void _record_trade_c(self, int64_t buy_order_id, int64_t sell_order_id,
                                 double price, int64_t qty,
@@ -471,6 +543,7 @@ cdef class OrderBookCython:
 
             remaining -= fill_qty
             front_order.quantity -= fill_qty
+            lvl.total_quantity -= fill_qty
 
             if front_order.quantity <= 0:
                 lvl.head += 1
@@ -510,6 +583,15 @@ cdef class OrderBookCython:
     cpdef void insert_order(self, dict order):
         cdef COrder c_order = self._order_from_dict(order)
         self._insert_c(c_order)
+
+    cpdef bint cancel_order(self, int64_t order_id, str side):
+        """Cancel a resting order by id. `side` is 'B' or 'S' (needed
+        since order ids are not required to be globally unique across
+        sides, and avoiding a global id->side Python index keeps the
+        engine's Python-object footprint minimal). Returns True if an
+        order was found and removed, False otherwise."""
+        cdef char c_side = ord(side)
+        return self._cancel_c(order_id, c_side)
 
     cpdef dict match_order(self, dict order):
         cdef COrder c_order = self._order_from_dict(order)
@@ -639,6 +721,36 @@ cdef class OrderBookCython:
             result["asks"].append(self._order_to_dict(lvl.orders[lvl.head]))
         return result
 
+    cpdef object best_bid(self):
+        """Best (highest) resting buy price and total resting quantity at
+        that price, or None if the buy side is empty. O(1) --- reads
+        levels[0] directly, no list is built."""
+        cdef double price
+        cdef int64_t qty
+        if self._best_bid_c(&price, &qty):
+            return {"price": price, "quantity": qty}
+        return None
+
+    cpdef object best_ask(self):
+        """Best (lowest) resting sell price and total resting quantity at
+        that price, or None if the sell side is empty. O(1)."""
+        cdef double price
+        cdef int64_t qty
+        if self._best_ask_c(&price, &qty):
+            return {"price": price, "quantity": qty}
+        return None
+
+    cpdef object spread(self):
+        """best_ask.price - best_bid.price, or None if either side is
+        empty (spread is undefined without both a bid and an ask). O(1)."""
+        cdef double bid_price, ask_price
+        cdef int64_t bid_qty, ask_qty
+        cdef bint has_bid = self._best_bid_c(&bid_price, &bid_qty)
+        cdef bint has_ask = self._best_ask_c(&ask_price, &ask_qty)
+        if not has_bid or not has_ask:
+            return None
+        return ask_price - bid_price
+
     cpdef dict get_last_trade(self):
         if self._trade_count == 0:
             return None
@@ -675,7 +787,7 @@ cdef class OrderBookCython:
         if n == 0 or self._latency_count_lifetime == 0:
             return {
                 "count": 0, "min_ns": 0, "mean_ns": 0, "max_ns": 0,
-                "p50_ns": 0, "p99_ns": 0, "p999_ns": 0,
+                "p50_ns": 0, "p95_ns": 0, "p99_ns": 0, "p999_ns": 0,
             }
 
         cdef int64_t* sorted_copy = <int64_t*>malloc(n * sizeof(int64_t))
@@ -688,7 +800,7 @@ cdef class OrderBookCython:
                 "min_ns": self._latency_min_lifetime,
                 "mean_ns": self._latency_sum_lifetime // self._latency_count_lifetime,
                 "max_ns": self._latency_max_lifetime,
-                "p50_ns": 0, "p99_ns": 0, "p999_ns": 0,
+                "p50_ns": 0, "p95_ns": 0, "p99_ns": 0, "p999_ns": 0,
             }
 
         for i in range(n):
@@ -696,8 +808,11 @@ cdef class OrderBookCython:
         qsort(sorted_copy, n, sizeof(int64_t), _compare_int64)
 
         cdef int64_t p50_idx = n // 2
+        cdef int64_t p95_idx = <int64_t>(n * 0.95)
         cdef int64_t p99_idx = <int64_t>(n * 0.99)
         cdef int64_t p999_idx = <int64_t>(n * 0.999)
+        if p95_idx >= n:
+            p95_idx = n - 1
         if p99_idx >= n:
             p99_idx = n - 1
         if p999_idx >= n:
@@ -709,6 +824,7 @@ cdef class OrderBookCython:
             "mean_ns": self._latency_sum_lifetime // self._latency_count_lifetime,
             "max_ns": self._latency_max_lifetime,
             "p50_ns": sorted_copy[p50_idx],
+            "p95_ns": sorted_copy[p95_idx],
             "p99_ns": sorted_copy[p99_idx],
             "p999_ns": sorted_copy[p999_idx],
         }
