@@ -1,4 +1,0 @@
-# ChronosMatch Day 1 skeleton — stdlib only, except:
-windows-curses; platform_system=="Windows"
-# `curses` is built into Python on Linux/macOS, but not on Windows.
-# windows-curses supplies it there (needed for dashboard_starter.py).
