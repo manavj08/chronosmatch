@@ -29,6 +29,7 @@ import sys
 import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "matching_engine"))
 
 from engine_check import require_compiled_engine
 from shared.ring_buffer import RingBuffer
@@ -40,13 +41,13 @@ ORDERS_PER_SECOND = 8
 RING_BUFFER_CAPACITY = 256
 
 
-def generator_process():
+def generator_process(duration: float = DEMO_DURATION_SECONDS, rate: float = ORDERS_PER_SECOND):
     """Same role as run_demo.py's generator_process, but silent ---
-    printing to stdout while curses owns the terminal would corrupt
+    printing to stdout while curses/ANSI owns the terminal would corrupt
     the dashboard's display."""
     rb = RingBuffer(capacity=RING_BUFFER_CAPACITY, create=False)
-    interval = 1.0 / ORDERS_PER_SECOND
-    end_time = time.time() + DEMO_DURATION_SECONDS
+    interval = 1.0 / rate
+    end_time = time.time() + duration
 
     while time.time() < end_time:
         order = generate_order()
@@ -56,21 +57,14 @@ def generator_process():
         time.sleep(interval)
 
 
-def dashboard_process():
-    from dashboard.live_dashboard import run_dashboard
-
-    def _run(stdscr):
-        run_dashboard(stdscr, ring_buffer_capacity=RING_BUFFER_CAPACITY,
-                      duration_seconds=DEMO_DURATION_SECONDS)
+def dashboard_process(mode: str = None, duration: float = DEMO_DURATION_SECONDS):
+    from dashboard.live_dashboard import start_dashboard
 
     try:
-        curses.wrapper(_run)
+        start_dashboard(ring_buffer_capacity=RING_BUFFER_CAPACITY,
+                        duration_seconds=duration, force_mode=mode)
     except KeyboardInterrupt:
         pass
-
-
-
-
 
 
 def report_exit_status(banner, **processes):
@@ -101,6 +95,20 @@ def report_exit_status(banner, **processes):
 
 
 def main():
+    import argparse
+    parser = argparse.ArgumentParser(description="ChronosMatch Live Dashboard Demo")
+    parser.add_argument("--mode", choices=["auto", "curses", "ansi"], default="auto",
+                        help="Display mode: 'auto' (default), 'curses', or 'ansi'")
+    parser.add_argument("--duration", type=float, default=DEMO_DURATION_SECONDS,
+                        help=f"Duration in seconds (default: {DEMO_DURATION_SECONDS})")
+    parser.add_argument("--rate", type=float, default=ORDERS_PER_SECOND,
+                        help=f"Orders per second (default: {ORDERS_PER_SECOND})")
+    args = parser.parse_args()
+
+    mode = None if args.mode == "auto" else args.mode
+    duration = args.duration
+    rate = args.rate
+
     # reset_shared_region() removes leftovers from a previous run (both
     # the .mem file and its .lock) and releases the creating handle, so
     # the child processes are the only holders. Doing this by hand used
@@ -113,8 +121,8 @@ def main():
 
     reset_shared_region(RING_BUFFER_CAPACITY)
 
-    gen = multiprocessing.Process(target=generator_process, name="generator")
-    dash = multiprocessing.Process(target=dashboard_process, name="dashboard")
+    gen = multiprocessing.Process(target=generator_process, args=(duration, rate), name="generator")
+    dash = multiprocessing.Process(target=dashboard_process, args=(mode, duration), name="dashboard")
 
     gen.start()
     dash.start()

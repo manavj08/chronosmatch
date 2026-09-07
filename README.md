@@ -43,7 +43,7 @@ chronosmatch_complete/
 cd chronosmatch_project
 pip install -r requirements.txt
 python setup_demo.py                # builds the Cython extension (needs a C compiler)
-pytest -v                           # 142 tests should pass
+pytest -v                           # 147 tests should pass
 python run_full_integration_demo.py # see everything run together
 ```
 

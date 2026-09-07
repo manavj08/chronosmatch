@@ -8,9 +8,10 @@ company spec).
 ## 1. Setup
 
 ```
-cd chronosmatch
+cd chronosmatch_project
 python -m venv venv
-venv\Scripts\activate
+venv\Scripts\activate      # Windows (PowerShell / Command Prompt)
+# source venv/bin/activate # Linux / macOS
 pip install -r requirements.txt
 ```
 
@@ -72,7 +73,7 @@ presentation.
 pytest -v
 ```
 
-142 tests should currently pass. `matching_engine/tests/` will skip
+147 tests should currently pass. `matching_engine/tests/` will skip
 with a clear message (not fail) if you haven't run the build step
 above yet.
 
@@ -98,19 +99,31 @@ fully replaces its role. `dashboard_starter.py` has already been
 removed (Day 7) — its role is now `dashboard/live_dashboard.py`, a
 real implementation, not a placeholder.
 
-## 5b. Run the live curses dashboard
+## 5b. Run the live terminal dashboard
 
 ```
 python run_dashboard_demo.py
 ```
 
-Starts a generator process + the real curses dashboard, both reading
+Starts a generator process + the real terminal dashboard, both reading
 from/writing to the shared-memory ring buffer. Shows a live Bid/Ask
 order book, running totals, live p50/p95/p99/p999 latency in
 microseconds (sourced directly from the engine's own
 `get_latency_stats()`), and highlights any trade at or above 50 units
 of quantity as a "whale" trade. Runs 20 seconds by default, or press
 Ctrl+C to exit early.
+
+**Display Modes & Terminal Compatibility:**
+The dashboard automatically detects your environment:
+- **Interactive Console** (Windows Command Prompt, native PowerShell): runs via `curses` (`windows-curses`).
+- **IDE Terminals (VS Code, etc.) / Piped / Redirected Shells:** automatically falls back to an in-place ANSI terminal renderer to prevent PDCurses "Redirection is not supported" errors.
+
+You can also explicitly select the display mode, duration, or order rate via CLI flags:
+```
+python run_dashboard_demo.py --mode ansi              # force ANSI text mode
+python run_dashboard_demo.py --mode curses            # force curses mode
+python run_dashboard_demo.py --duration 30 --rate 10  # customize duration & order rate
+```
 
 **Reading the latency numbers:** at this demo's default (small,
 readable) order rate, the dashboard's render loop reads one order per
@@ -123,12 +136,6 @@ and this project's engine-only benchmarks for that number measured
 without a display loop in the way). See
 `dashboard/live_dashboard.py`'s `format_latency_line()` docstring for
 the full explanation.
-
-**Note:** curses needs a real terminal (TTY) to render — it will not
-work if piped through something that isn't one (e.g. some CI
-environments, some IDE "run" panels that don't allocate a real
-terminal). If you see a `cbreak() returned ERR` error, run it directly
-in Command Prompt/PowerShell/a real terminal window instead.
 
 ## 5c. Run the persistence (SQLite ledger) demo
 
@@ -193,6 +200,7 @@ one closed.
 | `ModuleNotFoundError: order_book` (in `matching_engine/tests/`) | Extension not built yet — run the build step in section 2 |
 | Cython build fails with a compiler error | Confirm a C compiler is installed and on PATH (`gcc --version` or, on Windows, the VS Build Tools C++ workload) |
 | `ModuleNotFoundError: curses` | Run `pip install windows-curses` (already in requirements.txt for Windows) |
+| `Redirection is not supported.` or curses crash | The dashboard automatically falls back to ANSI mode; you can also force it via `--mode ansi` (e.g. `python run_dashboard_demo.py --mode ansi`), or run in a native console window |
 | `ImportError` on `shared_interface` | That module was removed early on — use `shared.ring_buffer.RingBuffer` instead |
-| Dashboard renders garbled/errors | Enlarge the terminal window; some IDE terminals don't fully support curses — use Command Prompt/PowerShell directly |
+| Dashboard renders garbled/errors | Enlarge the terminal window, or run in ANSI mode with `--mode ansi` |
 | Tests fail after a change | Run `pytest -v` for the specific failing file first; check `CHANGELOG.md` for what changed that day |

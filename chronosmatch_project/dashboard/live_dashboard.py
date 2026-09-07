@@ -123,7 +123,10 @@ def run_dashboard(stdscr, ring_buffer_capacity: int = 256, duration_seconds: flo
     """
     from order_book import OrderBookCython  # the compiled .so
 
-    curses.curs_set(0)      # hide the blinking cursor
+    try:
+        curses.curs_set(0)      # hide the blinking cursor
+    except Exception:
+        pass
     stdscr.nodelay(True)    # don't block waiting for keypresses
     stdscr.timeout(50)      # refresh ~20x/second
 
@@ -224,9 +227,158 @@ def _draw(stdscr, book, orders_processed: int, trades_matched: int, whale_lines:
     stdscr.refresh()
 
 
+def is_curses_supported() -> bool:
+    """Check whether curses can be safely initialized in this environment.
+
+    On Windows, PDCurses immediately calls exit(1) with 'Redirection is not supported.'
+    if stdin or stdout handle is not a console buffer (FILE_TYPE_CHAR, value 2).
+    """
+    if sys.platform == "win32":
+        try:
+            import ctypes
+            kernel32 = ctypes.windll.kernel32
+            stdin_h = kernel32.GetStdHandle(-10)   # STD_INPUT_HANDLE
+            stdout_h = kernel32.GetStdHandle(-11)  # STD_OUTPUT_HANDLE
+            # 2 == FILE_TYPE_CHAR (a real console handle)
+            if kernel32.GetFileType(stdin_h) != 2 or kernel32.GetFileType(stdout_h) != 2:
+                return False
+        except Exception:
+            return False
+    elif not (sys.stdin.isatty() and sys.stdout.isatty()):
+        return False
+
+    try:
+        import curses
+        return True
+    except ImportError:
+        return False
+
+
+def format_dashboard_text(book, orders_processed: int, trades_matched: int, whale_lines: list,
+                          latency_stats: dict) -> str:
+    """Format full dashboard state into an ANSI-compatible string representation."""
+    lines = []
+    lines.append("=" * 64)
+    lines.append("ChronosMatch \u2014 Live Order Book")
+    lines.append("(Press Ctrl+C to exit)")
+    lines.append("-" * 64)
+    lines.append(f"{'BIDS':<30}{'ASKS':<30}")
+
+    levels = book.get_top_levels(depth=5)
+    bids, asks = levels.get("bids", []), levels.get("asks", [])
+    num_rows = max(len(bids), len(asks), 1)
+
+    for i in range(num_rows):
+        b_str = f"{bids[i]['price']:>8.2f}  x{bids[i]['quantity']}" if i < len(bids) else ""
+        a_str = f"{asks[i]['price']:>8.2f}  x{asks[i]['quantity']}" if i < len(asks) else ""
+        lines.append(f"{b_str:<30}{a_str:<30}")
+
+    lines.append("-" * 64)
+    last_trade = book.get_last_trade()
+    if last_trade:
+        lines.append(f"Last trade:       {last_trade['price']:.2f} x{last_trade['quantity']}")
+    else:
+        lines.append("Last trade:       (none yet)")
+
+    lines.append(f"Orders processed: {orders_processed}")
+    lines.append(f"Trades matched:   {trades_matched}")
+    lines.append("")
+    lines.append(format_latency_line(latency_stats))
+    lines.append("")
+
+    if whale_lines:
+        lines.append("Recent whale trades:")
+        for line in whale_lines:
+            lines.append(f"  >>> {line}")
+    else:
+        lines.append("Recent whale trades: (none yet)")
+    lines.append("=" * 64)
+    return "\n".join(lines)
+
+
+def run_dashboard_ansi(ring_buffer_capacity: int = 256, duration_seconds: float = None,
+                       on_frame=None, refresh_interval: float = 0.05):
+    """Fallback live dashboard renderer using ANSI escape codes.
+
+    Runs in any terminal or IDE without requiring PDCurses / TTY handles.
+    """
+    from order_book import OrderBookCython
+
+    try:
+        import colorama
+        colorama.init()
+    except Exception:
+        pass
+
+    rb = RingBuffer(capacity=ring_buffer_capacity, create=False)
+    book = OrderBookCython()
+
+    orders_processed = 0
+    trades_matched = 0
+    recent_whale_lines = []
+    start_time = time.time()
+    last_draw_time = 0.0
+
+    try:
+        while True:
+            now = time.time()
+            if duration_seconds is not None and (now - start_time) > duration_seconds:
+                break
+
+            order = rb.read_order()
+            if order is not None:
+                orders_processed += 1
+                result = book.match_order(order)
+                trades_matched += len(result["trades"])
+                recent_whale_lines = update_whale_lines(recent_whale_lines, result["trades"])
+
+            if on_frame is not None:
+                try:
+                    on_frame(book, orders_processed, trades_matched)
+                except Exception:
+                    pass
+
+            if now - last_draw_time >= refresh_interval:
+                latency_stats = book.get_latency_stats()
+                text = format_dashboard_text(book, orders_processed, trades_matched,
+                                             recent_whale_lines, latency_stats)
+                sys.stdout.write("\033[2J\033[H" + text + "\n")
+                sys.stdout.flush()
+                last_draw_time = now
+
+            time.sleep(0.01)
+    finally:
+        rb.close()
+
+
+def start_dashboard(ring_buffer_capacity: int = 256, duration_seconds: float = None,
+                    on_frame=None, force_mode: str = None):
+    """Launch the dashboard in curses mode if supported, or ANSI mode as fallback.
+
+    force_mode can be 'curses', 'ansi', or None (auto-detect).
+    """
+    use_curses = False
+    if force_mode == "curses":
+        use_curses = True
+    elif force_mode == "ansi":
+        use_curses = False
+    else:
+        use_curses = is_curses_supported()
+
+    if use_curses:
+        import curses
+        def _run(stdscr):
+            run_dashboard(stdscr, ring_buffer_capacity=ring_buffer_capacity,
+                          duration_seconds=duration_seconds, on_frame=on_frame)
+        curses.wrapper(_run)
+    else:
+        run_dashboard_ansi(ring_buffer_capacity=ring_buffer_capacity,
+                           duration_seconds=duration_seconds, on_frame=on_frame)
+
+
 if __name__ == "__main__":
     try:
-        curses.wrapper(run_dashboard)
+        start_dashboard()
     except KeyboardInterrupt:
         pass
     print("Dashboard closed cleanly.")

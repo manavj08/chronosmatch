@@ -20,6 +20,7 @@ parent, before doing any work --- and so the fix only has to be written
 once instead of being copy-pasted into each runner and drifting.
 """
 
+import os
 import sys
 
 
@@ -32,6 +33,10 @@ def require_compiled_engine(exit_on_missing: bool = True) -> bool:
 
     Returns True when the engine is available.
     """
+    engine_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "matching_engine")
+    if os.path.isdir(engine_dir) and engine_dir not in sys.path:
+        sys.path.insert(0, engine_dir)
+
     try:
         import order_book  # noqa: F401  --- the compiled .pyd / .so
         return True

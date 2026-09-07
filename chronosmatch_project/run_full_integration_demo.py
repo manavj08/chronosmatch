@@ -93,7 +93,7 @@ def matcher_dashboard_ledger_process():
     real SQLite ledger, and renders the live curses dashboard -- all
     driven by dashboard.live_dashboard.run_dashboard()'s single
     synchronous loop via its on_frame hook."""
-    from dashboard.live_dashboard import run_dashboard
+    from dashboard.live_dashboard import start_dashboard
     from database import ledger
 
     if os.path.exists(DB_PATH):
@@ -114,12 +114,9 @@ def matcher_dashboard_ledger_process():
         state["last_flushed_index"] = book.trade_count
         state["total_flushed"] += inserted
 
-    def _run(stdscr):
-        run_dashboard(stdscr, ring_buffer_capacity=RING_BUFFER_CAPACITY,
-                      duration_seconds=DEMO_DURATION_SECONDS, on_frame=on_frame)
-
     try:
-        curses.wrapper(_run)
+        start_dashboard(ring_buffer_capacity=RING_BUFFER_CAPACITY,
+                        duration_seconds=DEMO_DURATION_SECONDS, on_frame=on_frame)
     except KeyboardInterrupt:
         pass
 
