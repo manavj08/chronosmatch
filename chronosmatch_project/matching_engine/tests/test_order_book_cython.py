@@ -78,14 +78,13 @@ def test_get_top_levels_depth():
     assert [o["price"] for o in levels["bids"]] == [106.0, 105.0, 104.0]
 
 
-def test_matches_pure_python_reference_ordering():
+def test_matches_pure_python_reference_ordering(ring_buffer):
     """Cross-check: the Cython version should produce the same sorted
     order as the pure-Python reference in engine/order_book.py, given
     the same input sequence. Guards against the Cython port silently
     diverging in behavior."""
     from engine.order_book import OrderBook
-    from shared.ring_buffer import RingBuffer
-
+    
     orders = [
         make_order(1, "B", 100.0, 10),
         make_order(2, "B", 103.0, 5),
@@ -97,7 +96,7 @@ def test_matches_pure_python_reference_ordering():
     for o in orders:
         cython_book.insert_order(o)
 
-    rb = RingBuffer(capacity=8, create=True)
+    rb = ring_buffer(capacity=8)
     python_book = OrderBook(ring_buffer=rb)
     for o in orders:
         python_book.insert_order(o)

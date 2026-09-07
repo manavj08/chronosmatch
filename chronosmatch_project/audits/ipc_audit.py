@@ -54,6 +54,7 @@ import time
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
 
 from shared.ring_buffer import RingBuffer
+from shared.shared_memory import reset_shared_region
 
 TOTAL_ORDERS = int(os.environ.get("IPC_AUDIT_ORDERS", 1_000_000))
 RING_BUFFER_CAPACITY = 4096
@@ -115,11 +116,12 @@ def consumer_process(ready_event, start_event, result_queue):
 
 
 def main():
-    backing_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "ring_buffer.mem")
-    if os.path.exists(backing_file):
-        os.remove(backing_file)
-
-    RingBuffer(capacity=RING_BUFFER_CAPACITY, create=True)
+    # reset_shared_region() removes leftovers from a previous run (both
+    # the .mem file and its .lock) and releases the creating handle, so
+    # the child processes are the only holders. Doing this by hand used
+    # to miss the lock file and keep the mapping open, which on Windows
+    # left files that could not be deleted or resized on the next run.
+    reset_shared_region(RING_BUFFER_CAPACITY)
 
     print("=" * 70)
     print("ChronosMatch — Mid-Project Review: IPC Audit (Day 8)")

@@ -16,7 +16,6 @@ someone accidentally reintroducing a sleep() or an O(n) scan into the
 hot path).
 """
 
-import os
 import sys
 import time
 from pathlib import Path
@@ -34,19 +33,25 @@ except ImportError:
     )
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
-from shared.ring_buffer import RingBuffer
 
 
-def fresh_ring_buffer(capacity=64):
-    backing_file = str(Path(__file__).resolve().parent.parent.parent / "ring_buffer.mem")
-    lock_file = backing_file + ".lock"
-    for path in (backing_file, lock_file):
-        if os.path.exists(path):
-            os.remove(path)
-    return RingBuffer(capacity=capacity, create=True)
+@pytest.fixture
+def fresh_ring_buffer(ring_buffer):
+    """Per-test, auto-closed ring buffer.
+
+    Was a plain helper that deleted the one global backing file and
+    built a buffer nobody ever closed. Each RingBuffer holds an fd on
+    the lock file, and on Windows an open handle makes that file
+    undeletable --- so the next test's cleanup failed with WinError 32.
+    The `ring_buffer` fixture in conftest.py gives each test its own
+    file and closes everything afterwards.
+    """
+    def _make(capacity=64):
+        return ring_buffer(capacity=capacity)
+    return _make
 
 
-def test_buy_matches_sell_through_real_ring_buffer_pipeline():
+def test_buy_matches_sell_through_real_ring_buffer_pipeline(fresh_ring_buffer):
     """The literal spec claim: a Buy correctly matches a corresponding
     Sell --- through the REAL pipeline (ring buffer write + read),
     not a dict handed directly to match_order()."""
@@ -71,7 +76,7 @@ def test_buy_matches_sell_through_real_ring_buffer_pipeline():
     assert result["resting"] is False
 
 
-def test_sell_matches_buy_through_real_ring_buffer_pipeline():
+def test_sell_matches_buy_through_real_ring_buffer_pipeline(fresh_ring_buffer):
     """Same as above, opposite direction --- both sides of "instantly
     matches a corresponding order" per the spec wording."""
     rb = fresh_ring_buffer()
@@ -93,7 +98,7 @@ def test_sell_matches_buy_through_real_ring_buffer_pipeline():
     assert result["trades"][0]["sell_order_id"] == 2
 
 
-def test_repeated_matches_through_pipeline_stay_correct():
+def test_repeated_matches_through_pipeline_stay_correct(fresh_ring_buffer):
     """Runs several match cycles through the real pipeline in sequence
     --- guards against state leaking between orders (e.g. a stale
     read/write pointer, or trade_id not advancing correctly) that a
@@ -117,7 +122,7 @@ def test_repeated_matches_through_pipeline_stay_correct():
         assert result["trades"][0]["trade_id"] == i + 1
 
 
-def test_match_latency_through_pipeline_is_reasonable():
+def test_match_latency_through_pipeline_is_reasonable(fresh_ring_buffer):
     """Regression guard, not a precise benchmark (see
     audits/engine_verification.py for the full percentile report).
     Median latency through the real pipeline should stay comfortably

@@ -55,7 +55,9 @@ import time
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "matching_engine"))
 
+from engine_check import require_compiled_engine
 from shared.ring_buffer import RingBuffer
+from shared.shared_memory import reset_shared_region
 from simulator.order_generator import generate_order
 
 DEMO_DURATION_SECONDS = 20
@@ -132,10 +134,49 @@ def matcher_dashboard_ledger_process():
     conn.close()
 
 
+
+
+
+
+def report_exit_status(banner, **processes):
+    """Print an honest summary and exit non-zero if any child crashed.
+
+    These demos used to print "Both processes exited cleanly"
+    unconditionally, without ever looking at an exit code. A child could
+    die on an unhandled exception and the demo would still announce
+    success --- which is exactly what happened when the Cython engine
+    was missing: the matcher crashed on import, and the demo reported a
+    clean finish regardless.
+    """
+    failures = {name: p.exitcode for name, p in processes.items() if p.exitcode != 0}
+
+    print()
+    print("=" * 70)
+    if failures:
+        print(f"{banner} FAILED.")
+        for name, code in failures.items():
+            print(f"  {name} process exited with code {code} "
+                  f"(see its traceback above)")
+        print("=" * 70)
+        sys.exit(1)
+
+    codes = ", ".join(f"{name} {p.exitcode}" for name, p in processes.items())
+    print(f"{banner} All processes exited cleanly (exit codes: {codes}).")
+    print("=" * 70)
+
+
 def main():
-    if os.path.exists(BACKING_FILE):
-        os.remove(BACKING_FILE)
-    RingBuffer(capacity=RING_BUFFER_CAPACITY, create=True)
+    # reset_shared_region() removes leftovers from a previous run (both
+    # the .mem file and its .lock) and releases the creating handle, so
+    # the child processes are the only holders. Doing this by hand used
+    # to miss the lock file and keep the mapping open, which on Windows
+    # left files that could not be deleted or resized on the next run.
+    # Check before starting any child process: the import failure
+    # otherwise happens inside a child, as a traceback buried in the
+    # output.
+    require_compiled_engine()
+
+    reset_shared_region(RING_BUFFER_CAPACITY, backing_file=BACKING_FILE)
 
     print("=" * 70)
     print("ChronosMatch — Full End-to-End Integration Demo (Day 22)")
@@ -155,8 +196,7 @@ def main():
 
     print()
     print("=" * 70)
-    print("Integration demo finished. Both processes exited cleanly")
-    print(f"(generator exit code {gen.exitcode}, matcher exit code {matcher.exitcode}).")
+    report_exit_status("Integration demo finished.", generator=gen, matcher=matcher)
     print("Every stage of the architecture ran in this single demo:")
     print("  market simulator -> mmap ring buffer -> Cython matching engine")
     print("  -> SQLite ledger (async-style batched flush) -> curses dashboard")

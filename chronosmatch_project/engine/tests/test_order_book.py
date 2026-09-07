@@ -12,7 +12,6 @@ Day 1 wiring change.
 import time
 
 from engine.order_book import OrderBook
-from shared.ring_buffer import RingBuffer
 
 
 def make_order(order_id, side, price, quantity):
@@ -25,8 +24,8 @@ def make_order(order_id, side, price, quantity):
     }
 
 
-def test_order_book_uses_real_ring_buffer():
-    rb = RingBuffer(capacity=4, create=True)
+def test_order_book_uses_real_ring_buffer(ring_buffer):
+    rb = ring_buffer(capacity=4)
     book = OrderBook(ring_buffer=rb)
 
     rb.write_order(make_order(1, "B", 101.0, 10))
@@ -37,15 +36,15 @@ def test_order_book_uses_real_ring_buffer():
     assert len(book.buy_side) == 1
 
 
-def test_process_next_returns_none_when_buffer_empty():
-    rb = RingBuffer(capacity=4, create=True)
+def test_process_next_returns_none_when_buffer_empty(ring_buffer):
+    rb = ring_buffer(capacity=4)
     book = OrderBook(ring_buffer=rb)
 
     assert book.process_next() is None
 
 
-def test_get_top_levels_shape():
-    rb = RingBuffer(capacity=4, create=True)
+def test_get_top_levels_shape(ring_buffer):
+    rb = ring_buffer(capacity=4)
     book = OrderBook(ring_buffer=rb)
 
     levels = book.get_top_levels()
@@ -53,8 +52,8 @@ def test_get_top_levels_shape():
     assert "asks" in levels
 
 
-def test_multiple_orders_through_real_buffer():
-    rb = RingBuffer(capacity=4, create=True)
+def test_multiple_orders_through_real_buffer(ring_buffer):
+    rb = ring_buffer(capacity=4)
     book = OrderBook(ring_buffer=rb)
 
     rb.write_order(make_order(1, "B", 101.0, 10))

@@ -60,7 +60,9 @@ import time
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "matching_engine"))
 
+from engine_check import require_compiled_engine
 from shared.ring_buffer import RingBuffer
+from shared.shared_memory import reset_shared_region
 
 SAMPLE_SIZE = 10_000  # number of buy/sell pairs to measure for the latency distribution
 
@@ -71,14 +73,10 @@ def verify_single_match_correctness():
     not an in-memory dict handed directly to match_order()."""
     from order_book import OrderBookCython
 
-    backing_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "ring_buffer.mem")
-    lock_file = backing_file + ".lock"
-    for path in (backing_file, lock_file):
-        if os.path.exists(path):
-            os.remove(path)
-
-    rb = RingBuffer(capacity=16, create=True)
+    reset_shared_region(16)
+    rb = RingBuffer(capacity=16, create=False)
     book = OrderBookCython()
+
 
     sell_order = {"order_id": 1, "side": "S", "price": 100.0,
                   "quantity": 10, "timestamp": time.perf_counter_ns()}
@@ -102,6 +100,7 @@ def verify_single_match_correctness():
         and result["trades"][0]["quantity"] == 10
         and result["resting"] is False
     )
+    rb.close()  # release the mapping before the next stage resizes the region
     return correct, result
 
 
@@ -113,7 +112,8 @@ def measure_match_latency():
     journey through the pipeline to producing a trade."""
     from order_book import OrderBookCython
 
-    rb = RingBuffer(capacity=64, create=True)
+    reset_shared_region(64)
+    rb = RingBuffer(capacity=64, create=False)
     book = OrderBookCython()
 
     latencies_ns = []
@@ -139,6 +139,7 @@ def measure_match_latency():
         assert len(result["trades"]) == 1, f"expected a match at iteration {i}, got {result}"
         latencies_ns.append(t_end - t_start)
 
+    rb.close()
     return latencies_ns
 
 
@@ -159,6 +160,11 @@ def main():
     print("=" * 70)
     print("ChronosMatch — Mid-Project Review: Engine Verification (Day 9)")
     print("=" * 70)
+
+    # Check up front rather than letting the first
+    # `from order_book import ...` deep inside stage 1 raise a bare
+    # ModuleNotFoundError after the banner has already printed.
+    require_compiled_engine()
 
     print("\n[1/2] Correctness: does a Buy instantly match a corresponding Sell,")
     print("      through the real ring-buffer pipeline (not a direct in-memory call)?")

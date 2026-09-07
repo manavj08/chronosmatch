@@ -25,9 +25,7 @@ testing requirement list against what already existed:
 """
 
 import multiprocessing
-import os
 import sys
-import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -35,44 +33,46 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from shared.ring_buffer import RingBuffer
 
 
-def _producer(ready, start_evt, count):
-    rb = RingBuffer(capacity=4096, create=False)
-    ready.set()
-    start_evt.wait()
-    for order_id in range(1, count + 1):
-        order = {
-            "order_id": order_id, "side": "B" if order_id % 2 else "S",
-            "price": 100.0 + (order_id % 200) * 0.01,
-            "quantity": (order_id % 50) + 1, "timestamp": order_id,
-        }
-        while not rb.write_order(order):
-            pass
+# Day 9: the backing-file path is passed to the children as an
+# argument instead of every process implicitly opening one
+# module-global path, and both children close their buffers on the way
+# out. Each RingBuffer holds an fd on the lock file; on Windows an open
+# handle makes that file undeletable (WinError 32), which is what broke
+# the _fresh_backing_files() cleanup this module used to do by hand.
+# The `shared_ipc_path` fixture in conftest.py now supplies a unique
+# path per test and removes both files afterwards.
 
 
-def _consumer(ready, start_evt, count, result_queue):
-    rb = RingBuffer(capacity=4096, create=False)
-    ready.set()
-    start_evt.wait()
-    received = []
-    while len(received) < count:
-        order = rb.read_order()
-        if order is None:
-            continue
-        received.append(order["order_id"])
-    result_queue.put(received)
+def _producer(ready, start_evt, count, backing_file):
+    with RingBuffer(capacity=4096, create=False, backing_file=backing_file) as rb:
+        ready.set()
+        start_evt.wait()
+        for order_id in range(1, count + 1):
+            order = {
+                "order_id": order_id, "side": "B" if order_id % 2 else "S",
+                "price": 100.0 + (order_id % 200) * 0.01,
+                "quantity": (order_id % 50) + 1, "timestamp": order_id,
+            }
+            while not rb.write_order(order):
+                pass
 
 
-def _fresh_backing_files():
-    backing_file = str(Path(__file__).resolve().parent.parent / "ring_buffer.mem")
-    lock_file = backing_file + ".lock"
-    for path in (backing_file, lock_file):
-        if os.path.exists(path):
-            os.remove(path)
+def _consumer(ready, start_evt, count, result_queue, backing_file):
+    with RingBuffer(capacity=4096, create=False, backing_file=backing_file) as rb:
+        ready.set()
+        start_evt.wait()
+        received = []
+        while len(received) < count:
+            order = rb.read_order()
+            if order is None:
+                continue
+            received.append(order["order_id"])
+        result_queue.put(received)
 
 
-def _run(count, timeout=60):
-    _fresh_backing_files()
-    RingBuffer(capacity=4096, create=True)
+def _run(count, backing_file, timeout=60):
+    with RingBuffer(capacity=4096, create=True, backing_file=backing_file):
+        pass  # create and initialize the region, then release the handle
 
     ctx = multiprocessing.get_context()
     producer_ready = ctx.Event()
@@ -81,9 +81,11 @@ def _run(count, timeout=60):
     result_queue = ctx.Queue()
 
     producer = multiprocessing.Process(
-        target=_producer, args=(producer_ready, start_event, count))
+        target=_producer,
+        args=(producer_ready, start_event, count, backing_file))
     consumer = multiprocessing.Process(
-        target=_consumer, args=(consumer_ready, start_event, count, result_queue))
+        target=_consumer,
+        args=(consumer_ready, start_event, count, result_queue, backing_file))
 
     producer.start()
     consumer.start()
@@ -102,12 +104,12 @@ def _run(count, timeout=60):
     return received, producer, consumer
 
 
-def test_100k_orders_no_loss_no_duplication_correct_order():
+def test_100k_orders_no_loss_no_duplication_correct_order(shared_ipc_path):
     """The 100,000-order cross-process scenario, as its own dedicated
     test rather than folded into the 20,000-order locking-regression
     test above it in tests/test_cross_process_locking.py."""
     count = 100_000
-    received, producer, consumer = _run(count)
+    received, producer, consumer = _run(count, shared_ipc_path)
 
     assert not producer.is_alive()
     assert not consumer.is_alive()
@@ -127,13 +129,13 @@ def test_100k_orders_no_loss_no_duplication_correct_order():
     )
 
 
-def test_process_startup_and_shutdown_is_clean():
+def test_process_startup_and_shutdown_is_clean(shared_ipc_path):
     """Explicit process-lifecycle check: both the producer and consumer
     must not just deliver correct data, but also exit with code 0 --
     a clean shutdown, not a crash-after-finishing-work. Kept at a small
     scale since this test is about the lifecycle, not throughput."""
     count = 2_000
-    received, producer, consumer = _run(count, timeout=30)
+    received, producer, consumer = _run(count, shared_ipc_path, timeout=30)
 
     assert producer.exitcode == 0, f"producer exited with code {producer.exitcode}"
     assert consumer.exitcode == 0, f"consumer exited with code {consumer.exitcode}"
@@ -142,15 +144,16 @@ def test_process_startup_and_shutdown_is_clean():
     assert len(received) == count
 
 
-def test_repeated_startup_and_shutdown_cycles_stay_clean():
+def test_repeated_startup_and_shutdown_cycles_stay_clean(shared_ipc_path):
     """Runs several independent start-to-shutdown cycles back to back
-    (fresh processes and a fresh backing file each time) -- guards
-    against state leaking between runs, e.g. a stale lock file or a
-    leftover mmap region from a previous cycle corrupting the next
-    one's startup."""
+    (fresh processes each time, and the shared region re-initialized
+    between cycles exactly as a real restart would) -- guards against
+    state leaking between runs, e.g. a stale lock file or a leftover
+    mmap region from a previous cycle corrupting the next one's
+    startup."""
     for cycle in range(3):
         count = 1_000
-        received, producer, consumer = _run(count, timeout=20)
+        received, producer, consumer = _run(count, shared_ipc_path, timeout=20)
 
         assert producer.exitcode == 0, f"cycle {cycle}: producer exit code {producer.exitcode}"
         assert consumer.exitcode == 0, f"cycle {cycle}: consumer exit code {consumer.exitcode}"

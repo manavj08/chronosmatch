@@ -28,9 +28,7 @@ manual audit script.
 """
 
 import multiprocessing
-import os
 import sys
-import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -41,45 +39,59 @@ TEST_ORDER_COUNT = 20_000  # enough to reliably reproduce the old race;
                             # small enough to run in well under a minute
 
 
-def _producer(ready, start_evt, count):
-    rb = RingBuffer(capacity=1024, create=False)
-    ready.set()
-    start_evt.wait()
-    for order_id in range(1, count + 1):
-        order = {
-            "order_id": order_id, "side": "B", "price": 100.0,
-            "quantity": 1, "timestamp": order_id,
-        }
-        while not rb.write_order(order):
-            pass
+# Day 9: the backing-file path is now passed in as an argument rather
+# than every process implicitly using one module-global path. The
+# children still attach by path, exactly as a real deployment would ---
+# they just get told which path. This lets each test run against its
+# own isolated file, so one test can never inherit a half-written
+# region from another, and cleanup cannot collide with a file another
+# test is still holding open.
+#
+# Both children also close their buffers before exiting. Each open
+# RingBuffer holds an fd on the lock file, and on Windows an open
+# handle makes that file undeletable (WinError 32) --- which is what
+# made these tests fail even though the IPC logic itself was correct.
 
 
-def _consumer(ready, start_evt, count, result_queue):
-    rb = RingBuffer(capacity=1024, create=False)
-    ready.set()
-    start_evt.wait()
-    received = []
-    while len(received) < count:
-        order = rb.read_order()
-        if order is None:
-            continue
-        received.append(order["order_id"])
-    result_queue.put(received)
+def _producer(ready, start_evt, count, backing_file):
+    with RingBuffer(capacity=1024, create=False, backing_file=backing_file) as rb:
+        ready.set()
+        start_evt.wait()
+        for order_id in range(1, count + 1):
+            order = {
+                "order_id": order_id, "side": "B", "price": 100.0,
+                "quantity": 1, "timestamp": order_id,
+            }
+            while not rb.write_order(order):
+                pass
 
 
-def test_no_data_loss_between_two_real_processes():
+def _consumer(ready, start_evt, count, result_queue, backing_file):
+    with RingBuffer(capacity=1024, create=False, backing_file=backing_file) as rb:
+        ready.set()
+        start_evt.wait()
+        received = []
+        while len(received) < count:
+            order = rb.read_order()
+            if order is None:
+                continue
+            received.append(order["order_id"])
+        result_queue.put(received)
+
+
+def test_no_data_loss_between_two_real_processes(shared_ipc_path):
     """The core regression check: every order written by a real,
     separate producer process must be received exactly once by a
     real, separate consumer process, with no loss and no duplication.
     This is exactly the property the old per-process Lock() bug
     violated."""
-    backing_file = str(Path(__file__).resolve().parent.parent / "ring_buffer.mem")
-    lock_file = backing_file + ".lock"
-    for path in (backing_file, lock_file):
-        if os.path.exists(path):
-            os.remove(path)
+    # The `shared_ipc_path` fixture (conftest.py) supplies a fresh,
+    # per-test path and removes both files afterwards, replacing the
+    # manual delete-the-global-file dance that used to live here.
+    backing_file = shared_ipc_path
 
-    RingBuffer(capacity=1024, create=True)
+    with RingBuffer(capacity=1024, create=True, backing_file=backing_file):
+        pass  # create and initialize the region, then release the handle
 
     ctx = multiprocessing.get_context()
     producer_ready = ctx.Event()
@@ -88,9 +100,11 @@ def test_no_data_loss_between_two_real_processes():
     result_queue = ctx.Queue()
 
     producer = multiprocessing.Process(
-        target=_producer, args=(producer_ready, start_event, TEST_ORDER_COUNT))
+        target=_producer,
+        args=(producer_ready, start_event, TEST_ORDER_COUNT, backing_file))
     consumer = multiprocessing.Process(
-        target=_consumer, args=(consumer_ready, start_event, TEST_ORDER_COUNT, result_queue))
+        target=_consumer,
+        args=(consumer_ready, start_event, TEST_ORDER_COUNT, result_queue, backing_file))
 
     producer.start()
     consumer.start()

@@ -10,17 +10,17 @@ import asyncio
 
 import pytest
 
-from shared.ring_buffer import RingBuffer
 from simulator.market_firehose import MarketFirehose
 
 
-def new_buffer(capacity=64):
-    return RingBuffer(capacity=capacity, create=True)
+def new_buffer(ring_buffer, capacity=64):
+    """Per-test, auto-closed ring buffer (see conftest.py)."""
+    return ring_buffer(capacity=capacity)
 
 
 @pytest.mark.asyncio
-async def test_start_and_stop_writes_orders():
-    rb = new_buffer()
+async def test_start_and_stop_writes_orders(ring_buffer):
+    rb = new_buffer(ring_buffer)
     firehose = MarketFirehose(rb, orders_per_second=100)
 
     firehose.start()
@@ -32,8 +32,8 @@ async def test_start_and_stop_writes_orders():
 
 
 @pytest.mark.asyncio
-async def test_pause_stops_generation_without_stopping_task():
-    rb = new_buffer()
+async def test_pause_stops_generation_without_stopping_task(ring_buffer):
+    rb = new_buffer(ring_buffer)
     firehose = MarketFirehose(rb, orders_per_second=200)
 
     firehose.start()
@@ -51,8 +51,8 @@ async def test_pause_stops_generation_without_stopping_task():
 
 
 @pytest.mark.asyncio
-async def test_resume_continues_generation():
-    rb = new_buffer()
+async def test_resume_continues_generation(ring_buffer):
+    rb = new_buffer(ring_buffer)
     firehose = MarketFirehose(rb, orders_per_second=200)
 
     firehose.start()
@@ -70,8 +70,8 @@ async def test_resume_continues_generation():
 
 
 @pytest.mark.asyncio
-async def test_get_stats_shape_and_rate():
-    rb = new_buffer()
+async def test_get_stats_shape_and_rate(ring_buffer):
+    rb = new_buffer(ring_buffer)
     firehose = MarketFirehose(rb, orders_per_second=50)
 
     firehose.start()
@@ -90,8 +90,8 @@ async def test_get_stats_shape_and_rate():
 
 
 @pytest.mark.asyncio
-async def test_double_start_is_a_no_op():
-    rb = new_buffer()
+async def test_double_start_is_a_no_op(ring_buffer):
+    rb = new_buffer(ring_buffer)
     firehose = MarketFirehose(rb, orders_per_second=100)
 
     firehose.start()
@@ -105,11 +105,11 @@ async def test_double_start_is_a_no_op():
 
 
 @pytest.mark.asyncio
-async def test_backoff_when_buffer_full():
+async def test_backoff_when_buffer_full(ring_buffer):
     """Tiny buffer, high rate --- forces write_with_backoff to actually
     hit a full buffer and either retry successfully or drop, never
     raise or hang."""
-    rb = new_buffer(capacity=2)
+    rb = new_buffer(ring_buffer, capacity=2)
     firehose = MarketFirehose(rb, orders_per_second=500)
 
     firehose.start()

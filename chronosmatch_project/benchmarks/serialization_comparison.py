@@ -50,6 +50,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."
 
 from shared.serializer import serialize, deserialize
 from shared.ring_buffer import RingBuffer
+from shared.shared_memory import lock_path_for, reset_shared_region
 
 DEFAULT_N = 500_000
 
@@ -100,34 +101,36 @@ def bench_full_ring_buffer(n: int) -> float:
     real two-process throughput numbers)."""
     backing_file = os.path.join(
         os.path.dirname(os.path.abspath(__file__)), "..", "serialization_comparison_ring.mem")
-    lock_file = backing_file + ".lock"
-    for p in (backing_file, lock_file):
-        if os.path.exists(p):
-            os.remove(p)
 
-    # RingBuffer always writes to shared/shared_memory.py's fixed
-    # BACKING_FILE path -- temporarily point it at an isolated file for
-    # this benchmark so it doesn't collide with any other process's
-    # real ring buffer.
-    import shared.shared_memory as shared_memory_module
-    original_backing_file = shared_memory_module.BACKING_FILE
-    original_lock_file = shared_memory_module.LOCK_FILE
-    shared_memory_module.BACKING_FILE = backing_file
-    shared_memory_module.LOCK_FILE = lock_file
-    try:
-        rb = RingBuffer(capacity=1024, create=True)
+    # Isolated backing file so this benchmark never collides with a real
+    # ring buffer belonging to another process.
+    #
+    # This used to monkeypatch shared_memory.BACKING_FILE / LOCK_FILE
+    # and then delete both files in a `finally`. Two problems, both of
+    # which only bite on Windows: the RingBuffer was never closed, so
+    # the mapping and the lock file descriptor were still open when the
+    # cleanup ran --- and Windows refuses to delete a file with open
+    # handles:
+    #
+    #     PermissionError: [WinError 32] The process cannot access the
+    #     file because it is being used by another process
+    #
+    # `backing_file` is now a constructor parameter, so the monkeypatch
+    # is unnecessary, and the `with` block guarantees both handles are
+    # released before anything tries to remove the files.
+    reset_shared_region(1024, backing_file=backing_file)
+
+    with RingBuffer(capacity=1024, create=False, backing_file=backing_file) as rb:
         order = SAMPLE_ORDER
         t0 = time.perf_counter()
         for _ in range(n):
             rb.write_order(order)
             rb.read_order()
         elapsed = time.perf_counter() - t0
-    finally:
-        shared_memory_module.BACKING_FILE = original_backing_file
-        shared_memory_module.LOCK_FILE = original_lock_file
-        for p in (backing_file, lock_file):
-            if os.path.exists(p):
-                os.remove(p)
+
+    for p in (backing_file, lock_path_for(backing_file)):
+        if os.path.exists(p):
+            os.remove(p)
 
     return n / elapsed
 

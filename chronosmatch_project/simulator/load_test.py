@@ -32,6 +32,7 @@ import sys
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
 
 from shared.ring_buffer import RingBuffer
+from shared.shared_memory import reset_shared_region
 from simulator.market_firehose import MarketFirehose
 
 DEFAULT_TARGETS = [10_000, 50_000, 100_000, 150_000, 200_000, 300_000, 500_000]
@@ -42,11 +43,14 @@ BREAKDOWN_THRESHOLD = 0.70  # "broken down" = achieved < 70% of target
 async def run_one_rate(target_rate: int, duration: float = RUN_DURATION_SECONDS) -> dict:
     """Run the firehose at `target_rate` for `duration` seconds with a
     concurrent drainer, and report the actual achieved throughput."""
-    backing_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "ring_buffer.mem")
-    if os.path.exists(backing_file):
-        os.remove(backing_file)
+    # Each call starts from a clean region. reset_shared_region() also
+    # clears the .lock file and releases the creating handle --- doing
+    # this by hand used to leave the previous run's mapping open, so on
+    # Windows the next iteration could not delete the file it had just
+    # been told to replace.
+    reset_shared_region(8192)
 
-    rb = RingBuffer(capacity=8192, create=True)
+    rb = RingBuffer(capacity=8192, create=False)
     firehose = MarketFirehose(rb, orders_per_second=target_rate)
 
     drained = 0
@@ -72,6 +76,7 @@ async def run_one_rate(target_rate: int, duration: float = RUN_DURATION_SECONDS)
         pass
 
     stats = firehose.get_stats()
+    rb.close()  # release the mapping so the next rate can reset the region
     return {
         "target": target_rate,
         "achieved": stats["actual_orders_per_second"],
@@ -131,6 +136,24 @@ def print_report(results: list):
     print("=" * 78)
     print("Spec target: 100,000 orders/sec -- see the table above for where")
     print("this specific machine sits relative to it.")
+    print()
+    print("IMPORTANT -- what this sweep does and does not measure.")
+    print("Producer and consumer here are two asyncio tasks sharing ONE")
+    print("event loop in ONE process. They take turns on a single thread,")
+    print("so this measures how the design behaves under self-contention,")
+    print("not its capacity. It is a deliberately pessimistic figure and a")
+    print("good regression signal, but it is NOT the number to quote")
+    print("against the spec target.")
+    print()
+    print("The architecture the spec describes -- and the one the project")
+    print("actually ships -- is a producer PROCESS and a consumer PROCESS")
+    print("on separate cores. For that, run:")
+    print()
+    print("    python audits/ipc_audit.py")
+    print()
+    print("which sends 1,000,000 orders between two real OS processes and")
+    print("verifies every one arrives exactly once, in order. That is the")
+    print("authoritative end-to-end throughput measurement.")
     print("=" * 78)
 
 

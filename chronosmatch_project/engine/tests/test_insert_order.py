@@ -12,7 +12,6 @@ Day 3-4, see TASKS.md).
 import time
 
 from engine.order_book import OrderBook
-from shared.ring_buffer import RingBuffer
 
 
 def make_order(order_id, side, price, quantity):
@@ -25,13 +24,18 @@ def make_order(order_id, side, price, quantity):
     }
 
 
-def new_book():
-    rb = RingBuffer(capacity=8, create=True)
-    return OrderBook(ring_buffer=rb)
+def new_book(ring_buffer):
+    """Build an OrderBook over a per-test, auto-closed ring buffer.
+
+    Takes the `ring_buffer` fixture (see conftest.py) rather than
+    constructing RingBuffer directly, so the buffer's mmap and lock
+    handles are released when the test ends.
+    """
+    return OrderBook(ring_buffer=ring_buffer(capacity=8))
 
 
-def test_buy_side_sorted_descending_by_price():
-    book = new_book()
+def test_buy_side_sorted_descending_by_price(ring_buffer):
+    book = new_book(ring_buffer)
     book.insert_order(make_order(1, "B", 100.0, 10))
     book.insert_order(make_order(2, "B", 102.0, 5))
     book.insert_order(make_order(3, "B", 101.0, 8))
@@ -40,8 +44,8 @@ def test_buy_side_sorted_descending_by_price():
     assert prices == [102.0, 101.0, 100.0]
 
 
-def test_sell_side_sorted_ascending_by_price():
-    book = new_book()
+def test_sell_side_sorted_ascending_by_price(ring_buffer):
+    book = new_book(ring_buffer)
     book.insert_order(make_order(1, "S", 105.0, 10))
     book.insert_order(make_order(2, "S", 100.0, 5))
     book.insert_order(make_order(3, "S", 102.5, 8))
@@ -50,8 +54,8 @@ def test_sell_side_sorted_ascending_by_price():
     assert prices == [100.0, 102.5, 105.0]
 
 
-def test_best_bid_and_ask_at_index_zero():
-    book = new_book()
+def test_best_bid_and_ask_at_index_zero(ring_buffer):
+    book = new_book(ring_buffer)
     book.insert_order(make_order(1, "B", 99.0, 10))
     book.insert_order(make_order(2, "B", 101.0, 10))
     book.insert_order(make_order(3, "S", 103.0, 10))
@@ -62,9 +66,9 @@ def test_best_bid_and_ask_at_index_zero():
     assert levels["asks"][0]["price"] == 102.0
 
 
-def test_equal_price_orders_keep_arrival_order():
+def test_equal_price_orders_keep_arrival_order(ring_buffer):
     """Time priority at equal price: first in, first out."""
-    book = new_book()
+    book = new_book(ring_buffer)
     book.insert_order(make_order(1, "B", 100.0, 10))
     book.insert_order(make_order(2, "B", 100.0, 20))
 
@@ -72,8 +76,8 @@ def test_equal_price_orders_keep_arrival_order():
     assert ids == [1, 2]
 
 
-def test_get_top_levels_respects_depth():
-    book = new_book()
+def test_get_top_levels_respects_depth(ring_buffer):
+    book = new_book(ring_buffer)
     for i in range(7):
         book.insert_order(make_order(i, "B", 100.0 + i, 1))
 

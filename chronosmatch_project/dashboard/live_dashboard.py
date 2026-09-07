@@ -135,29 +135,36 @@ def run_dashboard(stdscr, ring_buffer_capacity: int = 256, duration_seconds: flo
     recent_whale_lines = []  # last few whale-highlighted trades, newest first
     start_time = time.time()
 
-    while True:
-        if duration_seconds is not None and (time.time() - start_time) > duration_seconds:
-            break
+    # try/finally so the shared-memory mapping and the lock-file handle
+    # are released however the display ends --- duration elapsed, Ctrl-C,
+    # or an unexpected exception. A retained handle is invisible on
+    # POSIX but on Windows leaves files that the next run cannot delete.
+    try:
+        while True:
+            if duration_seconds is not None and (time.time() - start_time) > duration_seconds:
+                break
 
-        order = rb.read_order()
-        if order is not None:
-            orders_processed += 1
-            result = book.match_order(order)
-            trades_matched += len(result["trades"])
-            recent_whale_lines = update_whale_lines(recent_whale_lines, result["trades"])
+            order = rb.read_order()
+            if order is not None:
+                orders_processed += 1
+                result = book.match_order(order)
+                trades_matched += len(result["trades"])
+                recent_whale_lines = update_whale_lines(recent_whale_lines, result["trades"])
 
-        if on_frame is not None:
-            try:
-                on_frame(book, orders_processed, trades_matched)
-            except Exception:
-                pass  # a side-effect failure must never crash the live display
+            if on_frame is not None:
+                try:
+                    on_frame(book, orders_processed, trades_matched)
+                except Exception:
+                    pass  # a side-effect failure must never crash the live display
 
-        latency_stats = book.get_latency_stats()
-        _draw(stdscr, book, orders_processed, trades_matched, recent_whale_lines, latency_stats)
+            latency_stats = book.get_latency_stats()
+            _draw(stdscr, book, orders_processed, trades_matched, recent_whale_lines, latency_stats)
 
-        key = stdscr.getch()
-        if key == 3:  # Ctrl+C
-            break
+            key = stdscr.getch()
+            if key == 3:  # Ctrl+C
+                break
+    finally:
+        rb.close()
 
 
 def _draw(stdscr, book, orders_processed: int, trades_matched: int, whale_lines: list,

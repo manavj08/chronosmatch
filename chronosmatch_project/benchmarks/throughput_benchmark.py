@@ -47,7 +47,13 @@ def benchmark_generate_order_only(n=50_000):
 
 
 def benchmark_write_order_only(n=50_000):
-    rb = RingBuffer(capacity=1024, create=True)
+    # `with` so the mapping and lock handle are released before the
+    # next benchmark re-creates the region at a different capacity.
+    with RingBuffer(capacity=1024, create=True) as rb:
+        return _timed_write_only(rb, n)
+
+
+def _timed_write_only(rb, n):
     orders = [generate_order() for _ in range(n)]
 
     start = time.perf_counter()
@@ -62,8 +68,11 @@ def benchmark_write_order_only(n=50_000):
 
 
 def benchmark_generate_and_write_sync(n=50_000):
-    rb = RingBuffer(capacity=1024, create=True)
+    with RingBuffer(capacity=1024, create=True) as rb:
+        return _timed_generate_and_write(rb, n)
 
+
+def _timed_generate_and_write(rb, n):
     start = time.perf_counter()
     written = 0
     for _ in range(n):
@@ -80,7 +89,11 @@ async def benchmark_firehose_uncapped(duration_seconds=2):
     """Run MarketFirehose with NO artificial interval — i.e. request
     a target rate far above what's achievable, so the real ceiling
     shows up rather than the configured throttle."""
-    rb = RingBuffer(capacity=4096, create=True)
+    with RingBuffer(capacity=4096, create=True) as rb:
+        return await _run_uncapped(rb, duration_seconds)
+
+
+async def _run_uncapped(rb, duration_seconds):
     # Ask for an unrealistically high target so the loop never sleeps
     # waiting for its next scheduled tick --- this reveals the actual
     # ceiling instead of the throttle.
@@ -129,6 +142,14 @@ def main():
     print(f"      full stats: {stats}")
 
     print("\n" + "=" * 70)
+    print("Stages [2], [3] and [4] are all SINGLE-PROCESS measurements:")
+    print("in [4] the producer and the drainer share one event loop on one")
+    print("thread, so they contend with each other rather than running in")
+    print("parallel. Expect [4] to land BELOW the two-process figure, not")
+    print("above it -- that is the harness, not the design.")
+    print("For the real end-to-end number across two OS processes, run")
+    print("audits/ipc_audit.py (1,000,000 orders, verified exactly-once).")
+    print()
     print("Spec target: 100,000 orders/sec")
     print("See CHANGELOG.md / TASKS.md Day 4 entry for interpretation")
     print("of these numbers and what they mean for the spec target.")

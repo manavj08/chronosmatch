@@ -8,10 +8,29 @@ class RingBuffer:
 
     All real state (pointers, occupancy) lives in shared memory, so
     multiple processes using the same backing file see the same buffer.
+
+    Owns OS resources (a memory mapping and a lock file descriptor),
+    so it must be closed when you are done with it. Either call
+    close() or use it as a context manager:
+
+        with RingBuffer(capacity=1024, create=True) as rb:
+            rb.write_order(order)
     """
 
-    def __init__(self, capacity: int = 1024, create: bool = False):
-        self.mem = SharedRingMemory(capacity=capacity, create=create)
+    def __init__(self, capacity: int = 1024, create: bool = False, backing_file: str | None = None):
+        self.mem = SharedRingMemory(
+            capacity=capacity, create=create, backing_file=backing_file
+        )
+
+    @property
+    def backing_file(self) -> str:
+        """Path of the mmap file this buffer is attached to."""
+        return self.mem.backing_file
+
+    @property
+    def lock_file(self) -> str:
+        """Path of the lock file guarding this buffer."""
+        return self.mem.lock_file
 
     def is_empty(self) -> bool:
         """Return True if the buffer currently holds zero orders."""
@@ -46,7 +65,7 @@ class RingBuffer:
             self.mem.write_slot(write_ptr, data)
 
             new_write_ptr = (write_ptr + 1) % capacity
-            self.mem.update_header(read_ptr, new_write_ptr, occupancy + 1)
+            self.mem.update_header(read_ptr, new_write_ptr, occupancy + 1, capacity)
 
             return True
 
@@ -68,7 +87,7 @@ class RingBuffer:
             order = deserialize(data)
 
             new_read_ptr = (read_ptr + 1) % capacity
-            self.mem.update_header(new_read_ptr, write_ptr, occupancy - 1)
+            self.mem.update_header(new_read_ptr, write_ptr, occupancy - 1, capacity)
 
             return order
 
@@ -81,3 +100,19 @@ class RingBuffer:
             "read_pointer": read_ptr,
             "write_pointer": write_ptr,
         }
+
+    def close(self):
+        """Release the underlying shared memory and lock handles.
+
+        Idempotent. Day 9: added because nothing used to release the
+        lock file descriptor, which on Windows made the lock file
+        undeletable and broke every test that cleaned up after itself.
+        """
+        self.mem.close()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self.close()
+        return False

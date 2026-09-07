@@ -42,6 +42,8 @@ import time
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "matching_engine"))
 
+from engine_check import require_compiled_engine
+
 
 def benchmark_realistic_scenario():
     """Many orders, a bounded number of distinct price levels --- what
@@ -83,6 +85,8 @@ def benchmark_adversarial_scenario(depth: int):
 
 
 def main():
+    require_compiled_engine()
+
     print("=" * 70)
     print("ChronosMatch — Price-Level Bucketing Benchmark (Day 10)")
     print("=" * 70)

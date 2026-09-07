@@ -65,7 +65,9 @@ import time
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "matching_engine"))
 
+from engine_check import require_compiled_engine
 from shared.ring_buffer import RingBuffer
+from shared.shared_memory import reset_shared_region
 from simulator.order_generator import generate_order
 
 DEMO_DURATION_SECONDS = 10
@@ -140,15 +142,53 @@ def matcher_process():
             trades_since_last_summary = 0
 
 
-def main():
-    backing_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ring_buffer.mem")
-    if os.path.exists(backing_file):
-        os.remove(backing_file)  # start clean each demo run
 
+
+
+
+def report_exit_status(banner, **processes):
+    """Print an honest summary and exit non-zero if any child crashed.
+
+    These demos used to print "Both processes exited cleanly"
+    unconditionally, without ever looking at an exit code. A child could
+    die on an unhandled exception and the demo would still announce
+    success --- which is exactly what happened when the Cython engine
+    was missing: the matcher crashed on import, and the demo reported a
+    clean finish regardless.
+    """
+    failures = {name: p.exitcode for name, p in processes.items() if p.exitcode != 0}
+
+    print()
+    print("=" * 70)
+    if failures:
+        print(f"{banner} FAILED.")
+        for name, code in failures.items():
+            print(f"  {name} process exited with code {code} "
+                  f"(see its traceback above)")
+        print("=" * 70)
+        sys.exit(1)
+
+    codes = ", ".join(f"{name} {p.exitcode}" for name, p in processes.items())
+    print(f"{banner} All processes exited cleanly (exit codes: {codes}).")
+    print("=" * 70)
+
+
+def main():
     # The FIRST process to touch shared memory creates it; the demo
     # creates it here in the parent before either child starts, so
     # there's no race over who creates vs. attaches.
-    RingBuffer(capacity=RING_BUFFER_CAPACITY, create=True)
+    #
+    # reset_shared_region() removes leftovers from a previous run, both
+    # the .mem and its .lock, and releases the creating handle so the
+    # children are the only holders. Doing it by hand here used to miss
+    # the lock file and keep the mapping open, which on Windows made
+    # the next run unable to delete or resize either file.
+    # Check before starting any child process: the import failure
+    # otherwise happens inside a child, as a traceback buried in the
+    # output.
+    require_compiled_engine()
+
+    reset_shared_region(RING_BUFFER_CAPACITY)
 
     print("=" * 70)
     print("ChronosMatch — Live Demo")
@@ -167,10 +207,7 @@ def main():
     gen.join()
     match.join()
 
-    print()
-    print("=" * 70)
-    print("Demo finished. Both processes exited cleanly.")
-    print("=" * 70)
+    report_exit_status("Demo finished.", generator=gen, matcher=match)
 
 
 if __name__ == "__main__":

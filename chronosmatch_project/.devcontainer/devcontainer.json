@@ -1,0 +1,5 @@
+{
+    "name": "ChronosMatch",
+    "image": "mcr.microsoft.com/devcontainers/python:3.12",
+    "postCreateCommand": "cd chronosmatch_project && pip install -r requirements.txt && python setup_demo.py"
+}

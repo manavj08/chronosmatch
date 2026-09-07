@@ -120,14 +120,42 @@ class MarketFirehose:
             if remaining > 0:
                 await asyncio.sleep(remaining)
 
+    # Number of retries that yield to the event loop without arming a
+    # real timer. See _write_with_backoff for why this matters.
+    _FREE_YIELD_RETRIES = 2
+
     async def _write_with_backoff(self, order: dict, max_retries: int = 5) -> bool:
         """Try to write; if the buffer is full, yield control briefly
         and retry a bounded number of times rather than blocking
-        forever or busy-looping."""
+        forever or busy-looping.
+
+        Day 9 fix: the first retries now use `asyncio.sleep(0)` --- a
+        pure yield to the event loop --- instead of going straight to
+        `asyncio.sleep(0.001)`.
+
+        Why: "buffer is full" almost always means the consumer simply
+        has not been scheduled yet. A bare yield hands control to it
+        immediately and costs nothing. `asyncio.sleep(0.001)` instead
+        arms a real timer, and a 1 ms request is not honoured as 1 ms
+        on every platform --- on Windows the event loop's wait
+        granularity is the system timer tick (~15.6 ms by default), so
+        a "1 ms" backoff can stall the producer for over fifteen
+        milliseconds while the consumer drains the buffer in a
+        fraction of that and then sits idle. At a high target rate the
+        buffer fills on every tick, so that stall was being paid
+        continuously and was capping measured throughput at roughly
+        55k orders/sec on Windows regardless of how fast the IPC layer
+        itself ran. Real timed backoff is still used after a couple of
+        yields, for the genuine case where the consumer is actually
+        slower than the producer and spinning would waste CPU.
+        """
         for attempt in range(max_retries):
             if self.ring_buffer.write_order(order):
                 return True
-            await asyncio.sleep(0.001 * (attempt + 1))  # small backoff
+            if attempt < self._FREE_YIELD_RETRIES:
+                await asyncio.sleep(0)  # yield, no timer
+            else:
+                await asyncio.sleep(0.001 * (attempt - self._FREE_YIELD_RETRIES + 1))
         return False
 
     def start(self):
@@ -174,15 +202,15 @@ async def _demo():
     """Manual smoke test: run the firehose for 3 seconds at a small
     rate and print stats. Real throughput testing against the spec's
     100,000/sec target happens Day 4."""
-    rb = RingBuffer(capacity=256, create=True)
-    firehose = MarketFirehose(rb, orders_per_second=50)
+    with RingBuffer(capacity=256, create=True) as rb:
+        firehose = MarketFirehose(rb, orders_per_second=50)
 
-    firehose.start()
-    await asyncio.sleep(3)
-    await firehose.stop()
+        firehose.start()
+        await asyncio.sleep(3)
+        await firehose.stop()
 
-    print("stats:", firehose.get_stats())
-    print("buffer stats:", rb.get_stats())
+        print("stats:", firehose.get_stats())
+        print("buffer stats:", rb.get_stats())
 
 
 if __name__ == "__main__":

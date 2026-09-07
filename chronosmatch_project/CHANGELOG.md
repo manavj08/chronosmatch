@@ -1440,3 +1440,404 @@ docs back in sync with what's actually built.
 ### Tests
 `pytest -v` (whole project) → 142/142 passing (unchanged — this pass
 added demos and documentation, not engine/IPC/dashboard code).
+
+---
+
+## Windows portability pass — fixed a real OS-handle leak and a throughput test that measured the wrong thing
+
+The full suite ran green on Linux but produced **6 failures on Windows**
+(Python 3.14, `pytest -v`: 51 passed, 6 failed, 10 skipped). None of
+them were caused by the IPC logic itself — the shared-memory protocol,
+the cross-process locking, and the matching engine were all correct.
+Two underlying defects produced all six failures, and both were the
+kind that POSIX silently forgives and Windows does not.
+
+### Bug 1 — the cross-process lock's file descriptor was never closed
+
+`_CrossProcessLock.__init__` acquires its handle with
+`os.open(lock_path, os.O_CREAT | os.O_RDWR)`. That returns a **raw
+integer file descriptor**, not a Python file object, so nothing
+reclaims it: not garbage collection, and not `SharedRingMemory.close()`,
+which closed the mmap and the backing file but never the lock fd. On
+top of that, no test called `close()` at all — roughly twenty
+`RingBuffer(create=True)` calls across the suite, zero closes.
+
+Every one of those leaked a permanently-open handle on
+`ring_buffer.mem.lock`. POSIX allows unlinking a file that still has
+open handles, so on Linux and macOS the leak was completely invisible.
+Windows refuses, and the four cross-process tests that begin by
+deleting their backing files all failed with:
+
+    PermissionError: [WinError 32] The process cannot access the file
+    because it is being used by another process: '...ring_buffer.mem.lock'
+
+**Fixed** by giving `_CrossProcessLock` a `close()` (idempotent, plus a
+`__del__` safety net), calling it from `SharedRingMemory.close()`,
+adding `RingBuffer.close()`, and making both classes context managers.
+Construction is also now exception-safe: a `SharedRingMemory` that
+fails partway through `__init__` releases whatever it had already
+opened, instead of stranding a handle inside a half-built object.
+
+### Bug 2 — creating a region truncated a file that might still be mapped
+
+`SharedRingMemory.__init__` used an unconditional `open(BACKING_FILE,
+"wb")`, which truncates. Windows will not truncate a file that has a
+live memory mapping and raises:
+
+    OSError: [Errno 22] Invalid argument: '...ring_buffer.mem'
+
+This is what turned one failure into a cascade. When a test fails,
+pytest retains its traceback for the report; the traceback retains the
+test's frame; the frame retains its `RingBuffer` and therefore its
+mapping — for the rest of the session. So the throughput assertion
+failure below directly caused the `Errno 22` failure in the very next
+test.
+
+**Fixed** by only rewriting the backing file when it is absent or the
+wrong size, and resetting the header through the mapping otherwise.
+Attaching handles now also read the creator's capacity out of the
+header before mapping, so a process that guesses the capacity wrong
+maps the region that actually exists rather than a short one it can
+index past the end of.
+
+### Bug 3 — the throughput floor was calibrated on one machine's OS
+
+`test_firehose_sustains_high_throughput_not_just_low` asserted a
+hardcoded floor of 60,000 orders/sec. Windows measured 54,755/sec and
+failed. Two separate things were going on:
+
+**The assertion was measuring the wrong thing.** Cross-process locking
+costs a syscall per acquire and per release, and Windows'
+`msvcrt.locking` is materially more expensive than POSIX `flock`. The
+old threshold therefore encoded the *reference machine's lock
+throughput* alongside the async design it meant to test. A test that
+fails because of the OS it runs on is not a regression test.
+
+**There was also a genuine stall to fix.** `_write_with_backoff` went
+straight to `asyncio.sleep(0.001)` when the buffer was full. A 1 ms
+request is not honoured as 1 ms everywhere — on Windows the event
+loop's wait granularity is the system timer tick, ~15.6 ms by default.
+At a high target rate the buffer fills every tick, so the producer was
+paying that stall continuously while the consumer drained in a fraction
+of the time and then sat idle.
+
+**Fixed** on both fronts. The first retries now use `asyncio.sleep(0)`
+— a bare yield to the event loop, no timer armed — which is the right
+primitive anyway, since "buffer full" almost always just means the
+consumer has not been scheduled yet. Real timed backoff still kicks in
+after a couple of yields for the case where the consumer is genuinely
+slower. And the test now measures the machine's own raw IPC ceiling
+first (plain synchronous write/read pairs, no asyncio) and asserts the
+firehose reaches a healthy fraction of it. That is portable, and it
+asserts something stronger than the old absolute number did: that the
+async layer is not the bottleneck.
+
+### Changed
+- `shared/shared_memory.py` — `close()` on `_CrossProcessLock`;
+  `SharedRingMemory` closes all three resources, is idempotent,
+  exception-safe during construction, and is a context manager.
+  `backing_file` is now a constructor parameter (defaulting to the
+  module global, resolved at call time so
+  `benchmarks/serialization_comparison.py`'s monkeypatch still works).
+  New `lock_path_for()` and `reset_shared_region()` helpers.
+- `shared/ring_buffer.py` — `close()`, context-manager support,
+  `backing_file` passthrough, `backing_file`/`lock_file` properties.
+- `simulator/market_firehose.py` — backoff yields before it sleeps.
+- Every entry point that sets up the shared region
+  (`run_demo.py`, `run_persistence_demo.py`, `run_dashboard_demo.py`,
+  `run_full_integration_demo.py`, `audits/ipc_audit.py`,
+  `audits/engine_verification.py`, `simulator/load_test.py`) now calls
+  `reset_shared_region()` instead of open-coding the same three steps
+  and forgetting to release the creating handle each time.
+- `benchmarks/throughput_benchmark.py` — buffers scoped with `with`, so
+  one benchmark's mapping is released before the next re-creates the
+  region at a different capacity.
+- `dashboard/live_dashboard.py` — the display loop is wrapped in
+  `try/finally` so the mapping is released on Ctrl-C too.
+
+### Added
+- `conftest.py` — a `ring_buffer` fixture giving each test its own
+  backing file under `tmp_path` and closing every buffer it hands out;
+  a `shared_ipc_path` fixture for tests that spawn real child
+  processes; and session-level cleanup of stale default-path files.
+  Tests no longer share one global backing file, so a single failure
+  can no longer poison the tests after it.
+- Five regression tests: `close()` is idempotent; the context manager
+  releases the mapping; an attaching handle adopts the creator's
+  capacity; re-creating a region does not truncate a mapped file; and
+  the full-buffer backoff path does not stall the producer.
+
+### Verified, not just written
+- `pytest -q` → **61 passed, 10 skipped**, stable across repeated runs
+  (was 51 passed / 6 failed / 10 skipped). The 10 skips are unchanged
+  and expected: they need the compiled Cython module.
+- No stray `ring_buffer.mem*` files left in the project root after a run.
+- Both guards were checked by deliberately reintroducing the bugs.
+  Re-adding a per-order `asyncio.sleep()` drops throughput to 4% of the
+  raw IPC ceiling and fails the test with a message naming the cause;
+  removing the `lock.close()` call leaves the fd open, confirmed by
+  `os.fstat` on the descriptor after `close()`.
+- `simulator/load_test.py` sweeps all seven target rates in one process
+  (10k → 500k) and reaches 99.8% of the 100,000/sec spec target. This
+  sweep could not have completed on Windows before: each iteration
+  deletes a file the previous iteration still had mapped.
+- `benchmarks/throughput_benchmark.py` runs all four stages end to end.
+
+### Not verified — please confirm on the target machine
+These fixes were written and tested on Linux, where the two handle
+bugs are invisible by construction. The reasoning for each is specific
+and the mechanism is well understood, but **the decisive test is
+`pytest -v` on the Windows machine**. In particular, the absolute
+throughput number there depends on Windows lock-syscall cost, which
+cannot be measured from here — the test now adapts to whatever that
+machine can do, so it should pass regardless, but the reported figure
+is worth recording.
+
+### Tests
+`pytest -q` (whole project) → 61 passed, 10 skipped.
+
+---
+
+## Demo hardening — a crashed child process was being reported as success
+
+Running `python run_demo.py` on a fresh checkout produced:
+
+    ModuleNotFoundError: No module named 'order_book'
+
+...inside the matcher child process, and then, fifty lines of generator
+output later:
+
+    Demo finished. Both processes exited cleanly.
+
+The `ModuleNotFoundError` itself is not a defect: `order_book` is the
+compiled Cython extension, it is deliberately not committed to git
+(`.gitignore` excludes `*.pyd` / `*.so`), and HOW_TO_RUN.md step 2 says
+to build it with `python setup_demo.py`. Skipping that step is expected
+to fail.
+
+What it should not do is fail *quietly*. Two things were wrong:
+
+### The success banner never looked at an exit code
+
+`run_demo.py`, `run_dashboard_demo.py` and `run_persistence_demo.py`
+printed "Both processes exited cleanly" unconditionally after
+`join()`. A child could die on an unhandled exception and the demo
+still announced success and exited 0 --- which is precisely what
+happened here. (`run_full_integration_demo.py` at least printed the
+exit codes, but still called it clean and still exited 0.)
+
+**Fixed** with a shared `report_exit_status()` in each runner: it
+inspects every child's `exitcode`, names any that failed, and exits
+non-zero. Green output now means the run was actually green.
+
+### The failure surfaced in a child, buried in output
+
+The import happens inside the matcher process, so the traceback
+scrolled past under the generator's per-order logging and was easy to
+miss entirely.
+
+**Fixed** with `require_compiled_engine()`, called in the parent before
+any child starts. A missing engine now produces one clear block naming
+the fix (`python setup_demo.py`), the compiler requirement, and the
+HOW_TO_RUN.md section --- and exits 1.
+
+### Verified, not just written
+- With the engine unbuilt: `python run_demo.py` prints the actionable
+  message and exits 1, instead of a buried traceback plus a false
+  success banner.
+- With the engine built (`python setup_demo.py`): the full demo runs
+  end to end --- two real processes over shared memory, 50 orders
+  generated, 30 trades matched with per-trade latency --- and reports
+  "All processes exited cleanly (exit codes: generator 0, matcher 0)".
+- `audits/engine_verification.py` passes with the reworked buffer
+  lifecycle (p50 match latency 5.04 µs on the sandbox machine).
+
+### Tests
+With the Cython engine built, the full suite runs with nothing skipped:
+`pytest -q` → **147 passed, 0 skipped, 0 failed**. That is the
+project's historical 142 plus the 5 regression tests added in the
+Windows portability pass above.
+
+---
+
+## Follow-up: the compiled-engine guard was only on the demos
+
+`python audits/engine_verification.py` on a checkout without the built
+engine still produced a bare traceback:
+
+    ModuleNotFoundError: No module named 'order_book'
+
+...after its banner had already printed, from stage 1's
+`from order_book import OrderBookCython`.
+
+This was a gap in the previous pass, not a new defect. That pass added
+`require_compiled_engine()` to the four `run_*.py` demos and stopped
+there, missing `audits/engine_verification.py` and
+`benchmarks/level_bucketing_benchmark.py` --- which import the compiled
+engine exactly the same way. It also left four copies of the same
+helper function, one per demo, which is how a fifth caller gets missed
+in the first place.
+
+### Changed
+- **New `engine_check.py`** at the project root holds the single
+  `require_compiled_engine()`. The four duplicated copies are removed
+  and every runner imports this one instead.
+- `audits/engine_verification.py` and
+  `benchmarks/level_bucketing_benchmark.py` now call it too, before
+  doing any work.
+
+### Verified, not just written
+- With the engine unbuilt, all six entry points --- `run_demo.py`,
+  `run_dashboard_demo.py`, `run_persistence_demo.py`,
+  `run_full_integration_demo.py`, `audits/engine_verification.py`,
+  `benchmarks/level_bucketing_benchmark.py` --- print the same
+  actionable message and exit 1. No tracebacks, no partial banners.
+- With the engine built: `pytest -q` → 147 passed, 0 skipped;
+  `run_demo.py` completes and reports clean exit codes;
+  `audits/engine_verification.py` passes; and
+  `benchmarks/level_bucketing_benchmark.py` runs both its favorable and
+  adversarial cases.
+
+---
+
+## Windows throughput pass + the last leaked-handle site
+
+`python benchmarks/serialization_comparison.py` still failed on Windows:
+
+    PermissionError: [WinError 32] The process cannot access the file
+    because it is being used by another process:
+    '...serialization_comparison_ring.mem'
+
+And `python simulator/load_test.py` now completed its full sweep, but
+peaked around 78,000 orders/sec and reached only 74.2% of the
+100,000/sec spec target on that machine.
+
+### The last unfixed leak site
+
+`bench_full_ring_buffer()` monkeypatched `shared_memory.BACKING_FILE`
+and `LOCK_FILE`, built a RingBuffer, never closed it, and then tried to
+delete both files in a `finally`. Same defect as everywhere else, in the
+one file the earlier passes missed.
+
+**Fixed.** Since `backing_file` is now a constructor parameter, the
+monkeypatch is gone entirely, and the buffer is scoped with `with` so
+both handles are released before the cleanup runs. Verified: the
+benchmark completes and leaves no files behind.
+
+### Header reads and writes on the hot path
+
+`update_header()` re-read the entire header just to recover `capacity`
+--- a value the caller had already read one line earlier and which by
+definition cannot change. That doubled the header reads on every write
+and every read, inside the lock. `read_header()` also sliced the mmap
+(`self.mm[0:HEADER_SIZE]`) before unpacking, allocating a throwaway
+bytes object per call.
+
+**Fixed** by passing `capacity` through from the caller and switching to
+`struct.unpack_from` / `pack_into`, which work directly against the
+mapping. Measured on the reference machine: **225,283 → 284,914
+write+read pairs/sec, +26%**. This is platform-neutral --- it removes
+Python-level work from inside the lock, so Windows benefits too.
+
+### Two redundant syscalls per lock operation on Windows
+
+`_lock_fd` and `_unlock_fd` each began with `os.lseek(fd, 0, SEEK_SET)`.
+`msvcrt.locking()` locks from the current file position and, per the
+Win32 `_locking` documentation, does not move it --- so one seek when
+the lock is opened is sufficient, and the per-call seeks were four extra
+syscalls per order round trip on the hottest path in the project.
+
+Acting on that reasoning alone would have been reckless. If it were
+wrong, two processes would lock different bytes --- not an error, just
+an absence of mutual exclusion. Silent data loss. Exactly the Day 8 bug.
+
+**So it is verified rather than assumed.** `_CrossProcessLock.__init__`
+runs one lock/unlock cycle and checks the file position survives it. If
+it does, the per-call seeks are skipped; if the probe returns anything
+unexpected, or errors, the safe per-call seeking is kept. On POSIX
+`flock()` ignores the file position entirely, so the probe is a constant
+`True` and nothing changes there.
+
+### Verified, not just written
+- `pytest -q` with the engine built → **147 passed, 0 skipped**,
+  including the 100,000-order cross-process no-loss/no-duplication test
+  that would catch a broken lock.
+- Graduated load sweep on the reference machine: peak **148,290 →
+  197,313 orders/sec (+33%)**, and the 150,000/sec target now lands at
+  99.8% of request (was 98.9% at 100k and falling off after).
+- `benchmarks/serialization_comparison.py` completes and cleans up
+  after itself.
+
+### Note on the Windows number
+The 78,000/sec ceiling measured before this pass is a property of that
+machine's lock-syscall cost, not of the design --- the same code peaks
+far higher on Linux, where `flock` is cheaper than `msvcrt.locking`.
+Both changes above target exactly that bottleneck, so the Windows figure
+should improve materially, but by how much can only be measured there.
+Re-run `python simulator/load_test.py` and
+`python -m benchmarks.throughput_benchmark` to get the current numbers.
+
+---
+
+## Windows verification results + a misleading benchmark report
+
+Full run on the Windows target machine (Python 3.14.6, 12 cores) after
+the preceding passes.
+
+### What the numbers actually said
+
+    audits/ipc_audit.py    1,000,000 orders, two real OS processes
+                           0 missing, 0 duplicated, ordering correct
+                           120,117 orders/sec end-to-end
+
+    simulator/load_test.py peak 88,675/sec, 100k target at 82.4%
+
+    throughput_benchmark   [4/4] asyncio end-to-end: 69,768/sec
+
+The audit --- the largest, strictest and most realistic of the three ---
+**exceeds the 100,000 orders/sec spec target**, while the two smaller
+benchmarks appear to fall short of it. That is not a contradiction, and
+the difference is not noise.
+
+`ipc_audit.py` runs a producer PROCESS and a consumer PROCESS on
+separate cores: real parallelism, which is the architecture the spec
+describes and the one the project ships. `load_test.py` and stage [4]
+of `throughput_benchmark.py` run the producer and the consumer as two
+asyncio tasks sharing ONE event loop on ONE thread. They take turns.
+Those harnesses measure self-contention, not capacity, and they will
+always read lower than the two-process figure.
+
+Cross-checks that confirm this rather than assume it: the same machine's
+raw single-process write+read ceiling is 109,711 pairs/sec
+(`serialization_comparison.py`), and the single-process sweep reaches
+88,675/sec --- about 81% of that ceiling, which is healthy. There is no
+missing throughput to find in the async layer; the single-process
+numbers are simply bounded by a single thread doing both jobs.
+
+### The reporting was the defect
+
+Nothing in the code was wrong here, but `load_test.py` printed
+"Throughput breaks down at target=150,000/sec" and then "Spec target:
+100,000 orders/sec" with no indication that the figure above it is a
+deliberately pessimistic single-thread measurement. Read alongside the
+spec target by anyone who did not write the harness, it invites the
+conclusion that the system barely meets requirement --- when the
+authoritative measurement clears it by 20%.
+
+### Changed
+- `simulator/load_test.py` and `benchmarks/throughput_benchmark.py` now
+  state plainly that their figures are single-process and
+  self-contended, that this is expected to read below the two-process
+  number, and that `audits/ipc_audit.py` is the authoritative
+  end-to-end measurement --- with the command to run it.
+
+### Verified on the Windows target machine
+- `pytest -v` → 62 passed, 10 skipped (10 pending the Cython build).
+- All six engine-dependent entry points fail cleanly with the build
+  guard and exit 1.
+- `benchmarks/serialization_comparison.py` completes (it crashed with
+  WinError 32 before this round of fixes).
+- `audits/ipc_audit.py` → 1,000,000 orders, zero loss, zero
+  duplication, correct ordering, 120,117 orders/sec.
+- Single-process sweep improved across the fixes: 54,755 → 78,881 →
+  88,675 orders/sec peak; the 100k target went 74.2% → 82.4%.
