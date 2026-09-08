@@ -184,14 +184,6 @@ describes.
 | `database/` | SQLite trade ledger + async flusher (Day 14) | Resiliency, Week 4 |
 | `audits/` | Cross-process IPC audit (1M orders) + engine verification | Mid-Project Review |
 | `benchmarks/` | Throughput, price-level bucketing, and serialization-method (JSON/Pickle/struct) comparisons | — |
-| `archive_web_dashboard/` | Earlier self-directed plan (FastAPI + web UI), kept for reference, not part of the active deliverable | — |
-
-A separate, spec-exact `engine/matching_engine.pyx`+`.pxd` package and
-an `ipc/`+`simulator/` package are also provided alongside this repo
-(not merged into it, to avoid duplicating the real modules above under
-a second name) — see `ARCHITECTURE_DECISIONS.md` and each package's own
-README for why, and CHANGELOG.md's hardening-pass entries for what each
-one closed.
 
 ## Troubleshooting
 
@@ -203,4 +195,4 @@ one closed.
 | `Redirection is not supported.` or curses crash | The dashboard automatically falls back to ANSI mode; you can also force it via `--mode ansi` (e.g. `python run_dashboard_demo.py --mode ansi`), or run in a native console window |
 | `ImportError` on `shared_interface` | That module was removed early on — use `shared.ring_buffer.RingBuffer` instead |
 | Dashboard renders garbled/errors | Enlarge the terminal window, or run in ANSI mode with `--mode ansi` |
-| Tests fail after a change | Run `pytest -v` for the specific failing file first; check `CHANGELOG.md` for what changed that day |
+| Tests fail after a change | Run `pytest -v` for the specific failing file first to isolate the issue |
